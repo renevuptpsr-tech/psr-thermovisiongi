@@ -98,7 +98,7 @@ def _quality(number: float | None, required: bool) -> tuple[str, str | None]:
 def parse_workbook(
     file_bytes: bytes,
     template_items: list[dict[str, Any]],
-    ambient_temperature_c: float,
+    ambient_temperature_c: float | None = None,
 ) -> tuple[list[ParsedSheet], list[str]]:
     if not template_items:
         raise ValueError("Template tidak mempunyai item aktif.")
@@ -141,7 +141,11 @@ def parse_workbook(
                     quality, message = "INVALID", "Baris titik ukur tidak ditemukan"
                 elif column is None:
                     quality, message = "INVALID", f"Pemetaan kolom {key} tidak tersedia"
-                delta = round(temperature - ambient_temperature_c, 3) if temperature is not None else None
+                delta = (
+                    round(temperature - ambient_temperature_c, 3)
+                    if temperature is not None and ambient_temperature_c is not None
+                    else None
+                )
                 measurements.append(
                     ParsedMeasurement(
                         sheet_name=sheet_name,
@@ -180,9 +184,16 @@ def parse_workbook(
     return result, warnings
 
 
-def preview_rows(parsed_sheets: list[ParsedSheet]) -> list[dict[str, Any]]:
+def preview_rows(
+    parsed_sheets: list[ParsedSheet],
+    ambient_by_sheet: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for parsed in parsed_sheets:
-        rows.extend(m.as_dict() for m in parsed.measurements)
+        ambient = ambient_by_sheet.get(parsed.sheet_name) if ambient_by_sheet else None
+        for measurement in parsed.measurements:
+            row = measurement.as_dict()
+            if ambient is not None and measurement.temperature_c is not None:
+                row["delta_ambient_c"] = round(measurement.temperature_c - ambient, 3)
+            rows.append(row)
     return rows
-

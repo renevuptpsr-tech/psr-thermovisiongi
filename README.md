@@ -5,10 +5,10 @@ Aplikasi Streamlit untuk membaca hasil pengukuran Thermovisi dari Excel, memetak
 ## Alur
 
 1. Login menggunakan Supabase Auth.
-2. Pilih ULTG dan GI dari `v_dropdown_ultg` / `v_dropdown_gi`.
-3. Isi tanggal, waktu, arus pengukuran, arus puncak bulanan, dan suhu lingkungan.
-4. Pilih template standar atau custom lalu unggah Excel.
-5. Periksa hasil validasi dan petakan setiap sheet terisi ke Bay.
+2. Pilih ULTG, GI, lalu satu atau beberapa Bay yang akan diproses.
+3. Isi tanggal, waktu, arus pengukuran, arus puncak bulanan, dan suhu lingkungan untuk setiap Bay.
+4. Pilih template yang otomatis difilter berdasarkan fungsi/tegangan Bay, lalu unggah Excel.
+5. Petakan setiap sheet hanya ke Bay yang dipilih dan periksa hasil validasi.
 6. Simpan: file ke Google Drive; metadata, inspeksi, dan nilai suhu ke Supabase.
 
 ## Instalasi Windows PowerShell
@@ -72,4 +72,4 @@ Aktifkan Google Drive API, buat service account, lalu bagikan folder tujuan kepa
 - Nilai wajib kosong menjadi `INVALID` dan memblokir penyimpanan.
 - Nilai di luar -50 sampai 300 °C menjadi `WARNING`.
 - Hanya baris dengan nilai suhu yang dimasukkan ke `trx_thermovisi_measurement`.
-- `delta_ambient_c = temperature_c - ambient_temperature_c` dihitung sebelum insert.
+- `delta_ambient_c = temperature_c - ambient_temperature_c` dihitung menggunakan suhu lingkungan Bay tujuan masing-masing.

@@ -16,7 +16,13 @@ from .retry import retry_read
 def make_client(url: str, publishable_key: str, access_token: str | None = None, refresh_token: str | None = None) -> Client:
     client = create_client(url, publishable_key)
     if access_token and refresh_token:
-        client.auth.set_session(access_token, refresh_token)
+        # set_session memanggil Auth /user. Pada jaringan Windows/proxy yang
+        # tidak stabil, panggilan baca ini aman untuk dicoba ulang.
+        retry_read(
+            lambda: client.auth.set_session(access_token, refresh_token),
+            attempts=3,
+            initial_delay_seconds=0.75,
+        )
     return client
 
 

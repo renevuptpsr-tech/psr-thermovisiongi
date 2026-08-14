@@ -9,6 +9,13 @@ def test_winerror_10054_is_retryable():
     )
 
 
+def test_httpx_read_timeout_is_retryable():
+    class ReadTimeout(Exception):
+        pass
+
+    assert is_retryable_connection_error(ReadTimeout("The read operation timed out"))
+
+
 def test_retry_read_retries_connection_error_once():
     attempts = []
 
@@ -33,4 +40,3 @@ def test_retry_read_does_not_retry_permission_error():
     with pytest.raises(RuntimeError, match="permission denied"):
         retry_read(action, attempts=2, sleep=lambda _: None)
     assert len(attempts) == 1
-

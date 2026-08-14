@@ -9,6 +9,8 @@ T = TypeVar("T")
 
 _RETRYABLE_MESSAGES = (
     "winerror 10054",
+    "readtimeout",
+    "read operation timed out",
     "forcibly closed by the remote host",
     "connection reset",
     "server disconnected",
@@ -42,4 +44,3 @@ def retry_read(
                 raise
             sleep(initial_delay_seconds * (2**attempt))
     raise RuntimeError("retry_read reached an unreachable state")
-

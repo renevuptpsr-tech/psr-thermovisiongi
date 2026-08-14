@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+.venv_incomplete*/
+venv/
+
+# Streamlit secrets (jangan pernah commit kredensial)
+.streamlit/secrets.toml
+
+# Environment and service-account credentials
+.env
+.env.*
+!.env.example
+*service-account*.json
+*service_account*.json
+credentials.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+

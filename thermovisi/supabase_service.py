@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from supabase import Client, create_client
 
 from .excel_parser import ParsedSheet
 from .google_drive import upload_excel
+from .inspection import build_inspection_row
 
 
 def make_client(url: str, publishable_key: str, access_token: str | None = None, refresh_token: str | None = None) -> Client:
@@ -101,11 +102,7 @@ def save_import(
     template_code: str,
     parsed_sheets: list[ParsedSheet],
     sheet_to_bay: dict[str, str],
-    measurement_date: date,
-    measurement_time: time,
-    measurement_current_a: float,
-    monthly_peak_current_a: float,
-    ambient_temperature_c: float,
+    metadata_by_bay: dict[str, dict[str, Any]],
     executor: str | None,
     notes: str | None,
     user_id: str,
@@ -115,8 +112,27 @@ def save_import(
     if duplicate:
         raise ValueError(f"File sudah pernah diunggah (status {duplicate['processing_status']}, upload_id {duplicate['upload_id']}).")
 
-    drive = upload_excel(file_bytes, filename, mime_type, folder_id, service_account_info)
     upload_id = str(uuid.uuid4())
+    prepared_inspections: list[tuple[ParsedSheet, dict[str, Any], float]] = []
+    for parsed in parsed_sheets:
+        target_bay = sheet_to_bay[parsed.sheet_name]
+        if target_bay not in metadata_by_bay:
+            raise ValueError(f"Metadata untuk Bay {target_bay} belum tersedia.")
+        metadata = metadata_by_bay[target_bay]
+        inspection = build_inspection_row(
+            inspection_id=str(uuid.uuid4()),
+            upload_id=upload_id,
+            target_functloc_id=target_bay,
+            source_sheet_name=parsed.sheet_name,
+            template_code=template_code,
+            metadata=metadata,
+            executor=executor,
+            notes=notes,
+            user_id=user_id,
+        )
+        prepared_inspections.append((parsed, inspection, float(metadata["ambient_temperature_c"])))
+
+    drive = upload_excel(file_bytes, filename, mime_type, folder_id, service_account_info)
     upload_row = {
         "upload_id": upload_id,
         "file_provider": "GOOGLE_DRIVE",
@@ -136,24 +152,9 @@ def save_import(
 
     try:
         total_measurements = 0
-        for parsed in parsed_sheets:
-            inspection_id = str(uuid.uuid4())
-            client.table("trx_thermovisi_inspection").insert({
-                "inspection_id": inspection_id,
-                "upload_id": upload_id,
-                "target_functloc_id": sheet_to_bay[parsed.sheet_name],
-                "source_sheet_name": parsed.sheet_name,
-                "measurement_date": measurement_date.isoformat(),
-                "measurement_time": measurement_time.strftime("%H:%M:%S"),
-                "measurement_current_a": measurement_current_a,
-                "monthly_peak_current_a": monthly_peak_current_a,
-                "ambient_temperature_c": ambient_temperature_c,
-                "executor": executor or None,
-                "inspection_status": "PROCESSED",
-                "notes": notes or None,
-                "created_by": user_id,
-                "template_code": template_code,
-            }).execute()
+        for parsed, inspection, ambient_c in prepared_inspections:
+            inspection_id = inspection["inspection_id"]
+            client.table("trx_thermovisi_inspection").insert(inspection).execute()
 
             rows = []
             for measurement in parsed.measurements:
@@ -168,7 +169,7 @@ def save_import(
                     "temperature_c": measurement.temperature_c,
                     "source_cell_address": measurement.source_cell_address,
                     "source_value_raw": measurement.source_value_raw,
-                    "delta_ambient_c": measurement.delta_ambient_c,
+                    "delta_ambient_c": round(measurement.temperature_c - ambient_c, 3),
                     "data_quality_status": measurement.data_quality_status,
                     "validation_message": measurement.validation_message,
                 })
@@ -191,4 +192,3 @@ def save_import(
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }).eq("upload_id", upload_id).execute()
         raise
-

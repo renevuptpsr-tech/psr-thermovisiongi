@@ -2,7 +2,7 @@ from io import BytesIO
 
 from openpyxl import Workbook
 
-from thermovisi.excel_parser import parse_workbook
+from thermovisi.excel_parser import parse_workbook, preview_rows
 
 
 def workbook_bytes() -> bytes:
@@ -51,3 +51,16 @@ def test_label_search_single_value():
     sheets, _ = parse_workbook(buffer.getvalue(), items, 30.0)
     assert sheets[0].measurements[0].source_cell_address == "E20"
     assert sheets[0].measurements[0].delta_ambient_c == 7.25
+
+
+def test_preview_uses_ambient_for_each_sheet():
+    items = [{
+        "template_item_id": 1, "form_section_code": "MAIN", "sequence_no": 1,
+        "source_sheet_pattern": r"^BAY\d+$", "source_row_no": 15, "source_occurrence_no": 1,
+        "raw_point_label": "Titik A", "equipment_group_code": "PMT", "point_code": "POINT_A",
+        "measurement_mode_code": "PHASE", "phase_codes": ["R", "S", "T"],
+        "source_value_map": {"R": "J", "S": "K", "T": "L"}, "is_required": True,
+    }]
+    sheets, _ = parse_workbook(workbook_bytes(), items)
+    rows = preview_rows(sheets, {"BAY1": 35.0})
+    assert [row["delta_ambient_c"] for row in rows] == [5.0, 6.5, 7.0]

@@ -42,6 +42,9 @@ def secret(name: str, default: str = "") -> str:
 
 
 def authenticated_client():
+    cached_client = st.session_state.get("supabase_client")
+    if cached_client is not None:
+        return cached_client
     auth = st.session_state.get("auth") or {}
     client = make_client(
         secret("SUPABASE_URL"),
@@ -54,7 +57,22 @@ def authenticated_client():
         st.session_state.auth.update(
             {"access_token": session.access_token, "refresh_token": session.refresh_token}
         )
+    st.session_state.supabase_client = client
     return client
+
+
+def stop_for_reference_error(error: Exception) -> None:
+    st.error(f"Koneksi ke Supabase terputus saat membaca referensi: {error}")
+    st.caption(
+        "Proyek Supabase terdeteksi aktif. Gangguan ini biasanya bersifat sementara atau berasal dari jaringan/proxy lokal."
+    )
+    if st.button("Coba baca ulang", type="primary"):
+        st.session_state.supabase_client = None
+        st.session_state.reference_cache = {
+            "gi": {}, "bays": {}, "template_items": {}
+        }
+        st.rerun()
+    st.stop()
 
 
 def bay_label(row: dict[str, Any]) -> str:
@@ -120,6 +138,8 @@ def suggested_bay_label(sheet_name: str, selected_rows: list[dict[str, Any]]) ->
 
 for key, value in {
     "auth": None,
+    "supabase_client": None,
+    "reference_cache": {"gi": {}, "bays": {}, "template_items": {}},
     "parsed": None,
     "parse_warnings": [],
     "parse_signature": None,
@@ -138,6 +158,8 @@ with st.sidebar:
         st.caption("Pengguna aktif")
         st.write(st.session_state.auth["email"])
         if st.button("Keluar", use_container_width=True):
+            st.session_state.supabase_client = None
+            st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
             st.session_state.auth = None
             st.session_state.parsed = None
             st.rerun()
@@ -149,9 +171,10 @@ with st.sidebar:
             submitted = st.form_submit_button("Masuk", use_container_width=True, type="primary")
         if submitted:
             try:
-                st.session_state.auth = sign_in(
-                    make_client(secret("SUPABASE_URL"), secret("SUPABASE_KEY")), email, password
-                )
+                login_client = make_client(secret("SUPABASE_URL"), secret("SUPABASE_KEY"))
+                st.session_state.auth = sign_in(login_client, email, password)
+                st.session_state.supabase_client = login_client
+                st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
                 st.rerun()
             except Exception:
                 st.error("Login gagal. Periksa email dan password.")
@@ -160,13 +183,29 @@ if not st.session_state.auth:
     st.info("Silakan masuk menggunakan akun Supabase untuk memulai inspeksi.")
     st.stop()
 
-client = authenticated_client()
 try:
-    ultg_rows = fetch_ultg(client)
-    templates = fetch_templates(client)
+    client = authenticated_client()
 except Exception as exc:
-    st.error(f"Tidak dapat membaca referensi Supabase: {exc}")
+    st.error(f"Sesi Supabase tidak dapat dipulihkan: {exc}")
+    if st.button("Masuk ulang", type="primary"):
+        st.session_state.auth = None
+        st.session_state.supabase_client = None
+        st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
+        st.rerun()
     st.stop()
+reference_cache = st.session_state.reference_cache
+reference_cache.setdefault("gi", {})
+reference_cache.setdefault("bays", {})
+reference_cache.setdefault("template_items", {})
+try:
+    if "ultg" not in reference_cache:
+        reference_cache["ultg"] = fetch_ultg(client)
+    if "templates" not in reference_cache:
+        reference_cache["templates"] = fetch_templates(client)
+    ultg_rows = reference_cache["ultg"]
+    templates = reference_cache["templates"]
+except Exception as exc:
+    stop_for_reference_error(exc)
 
 with st.container(border=True):
     st.markdown("### 1 · Pilih lokasi dan Bay")
@@ -180,7 +219,14 @@ with st.container(border=True):
         )
     ultg_flc = ultg_options.get(ultg_choice)
 
-    gi_rows = fetch_gi(client, ultg_flc) if ultg_flc else []
+    gi_rows = []
+    if ultg_flc:
+        try:
+            if ultg_flc not in reference_cache["gi"]:
+                reference_cache["gi"][ultg_flc] = fetch_gi(client, ultg_flc)
+            gi_rows = reference_cache["gi"][ultg_flc]
+        except Exception as exc:
+            stop_for_reference_error(exc)
     gi_options = {f"{row['gi_name']} — {row['gi_flc']}": row["gi_flc"] for row in gi_rows}
     with location_2:
         gi_choice = st.selectbox(
@@ -193,7 +239,15 @@ with st.container(border=True):
         )
     gi_flc = gi_options.get(gi_choice)
 
-    bay_rows = fetch_bays(client, ultg_flc, gi_flc) if ultg_flc and gi_flc else []
+    bay_rows = []
+    if ultg_flc and gi_flc:
+        bay_cache_key = f"{ultg_flc}|{gi_flc}"
+        try:
+            if bay_cache_key not in reference_cache["bays"]:
+                reference_cache["bays"][bay_cache_key] = fetch_bays(client, ultg_flc, gi_flc)
+            bay_rows = reference_cache["bays"][bay_cache_key]
+        except Exception as exc:
+            stop_for_reference_error(exc)
     with location_3:
         st.metric("Bay tersedia", len(bay_rows))
 
@@ -319,7 +373,9 @@ with st.container(border=True):
     parse_disabled = not (uploaded and template_code and not metadata_errors)
     if st.button("Baca dan validasi Excel", type="primary", disabled=parse_disabled):
         try:
-            items = fetch_template_items(client, template_code)
+            if template_code not in reference_cache["template_items"]:
+                reference_cache["template_items"][template_code] = fetch_template_items(client, template_code)
+            items = reference_cache["template_items"][template_code]
             parsed, warnings = parse_workbook(uploaded.getvalue(), items)
             st.session_state.parsed = parsed
             st.session_state.parse_warnings = warnings

@@ -69,6 +69,8 @@ Aktifkan Google Drive API, buat service account, lalu bagikan folder tujuan kepa
 ## Catatan validasi
 
 - Sheet yang cocok pola template tetapi tidak memiliki nilai angka akan dilewati.
+- Referensi ULTG, GI, Bay, dan template disimpan dalam cache sesi agar tidak dibaca ulang pada setiap perubahan form.
+- Gangguan koneksi sementara seperti Windows `10054` akan dicoba ulang untuk operasi baca yang aman.
 - Nilai wajib kosong menjadi `INVALID` dan memblokir penyimpanan.
 - Nilai di luar -50 sampai 300 °C menjadi `WARNING`.
 - Hanya baris dengan nilai suhu yang dimasukkan ke `trx_thermovisi_measurement`.

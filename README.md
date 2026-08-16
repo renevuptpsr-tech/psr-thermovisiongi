@@ -70,6 +70,10 @@ memvalidasi HMAC-SHA256, timestamp, nonce, SHA-256 file, ekstensi, folder, dan u
 sebelum menyimpan file ke Drive. Petunjuk deployment tersedia di
 `apps_script/README.md`.
 
+File disusun otomatis sebagai `TAHUN / NAMA GARDU INDUK / NN - NAMA BULAN / NAMA FILE`
+berdasarkan tanggal pelaksanaan. Seluruh Bay dalam satu workbook harus menggunakan
+bulan dan tahun pelaksanaan yang sama.
+
 Folder penyimpanan proyek ini menggunakan ID `1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i`. Isi konfigurasi berikut; aplikasi juga dapat menormalisasi URL folder lengkap menjadi ID tersebut:
 
 ```toml

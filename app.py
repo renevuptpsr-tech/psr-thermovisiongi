@@ -39,12 +39,20 @@ st.markdown(
       .block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1500px;}
       h1, h2, h3 {letter-spacing: -0.02em;}
       [data-testid="stMetric"] {background: #f5f9fa; border: 1px solid #dbe8eb; padding: 0.8rem 1rem; border-radius: 0.75rem;}
+      section[data-testid="stSidebar"] [data-testid="stRadio"] label {
+        padding: 0.55rem 0.7rem;
+        border-radius: 0.55rem;
+        margin-bottom: 0.2rem;
+      }
+      section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+        background: #eef6f7;
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
-st.title("Thermovision Gardu Induk")
-st.caption("Impor hasil pengukuran · validasi Python · penyimpanan terstruktur Supabase")
+st.title("Thermovisi Gardu Induk")
+st.caption("Pengelolaan hasil inspeksi dan monitoring pelaksanaan Thermovisi")
 
 
 def secret(name: str, default: str = "") -> str:
@@ -203,18 +211,25 @@ except Exception as exc:
 
 with st.sidebar:
     st.divider()
+    st.caption("NAVIGASI UTAMA")
     active_page = st.radio(
         "Menu",
-        ["Import inspeksi", "Monitoring upload"],
+        ["IMPORT DATA", "MONITORING"],
+        label_visibility="collapsed",
         key="active_page",
     )
 
-if active_page == "Monitoring upload":
+if active_page == "MONITORING":
     render_upload_monitoring_page(
         client,
         ultg_rows=ultg_rows,
     )
     st.stop()
+
+st.markdown("## Import Data Thermovisi")
+st.caption(
+    "Unggah hasil inspeksi, validasi pasangan Bay–sheet, review analisa, lalu simpan data final."
+)
 
 with st.container(border=True):
     st.markdown("### Klasifikasi inspeksi")

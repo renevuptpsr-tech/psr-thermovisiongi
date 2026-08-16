@@ -76,3 +76,18 @@ def test_pmt_insulator_is_evaluated_as_phase_group():
     assert not statuses
     assert patches[0].values["Rule set"] == "THERMOVISI_PMT_V1"
     assert patches[0].values["Kode aturan"] == "PMT_INSULATOR_NETA"
+
+
+def test_general_phase_fallback_is_evaluated():
+    items = [{
+        "template_item_id": 1, "analysis_rule_code": "GENERAL_NETA_PHASE",
+        "point_code": "WT_BODY", "comparison_group_code": None,
+    }]
+    patches, statuses = build_evaluation_patches(
+        items,
+        [measurement(1, "R", 40), measurement(1, "S", 42), measurement(1, "T", 41)],
+        measurement_current_a=100, monthly_peak_current_a=200, ambient_temperature_c=30,
+    )
+    assert not statuses
+    assert patches[0].values["Rule set"] == "THERMOVISI_GENERAL_V1"
+    assert patches[0].values["Kode aturan"] == "GENERAL_NETA_PHASE"

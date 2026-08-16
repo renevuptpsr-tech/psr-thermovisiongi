@@ -741,16 +741,7 @@ with st.container(border=True):
     if not service_account or not drive_folder_id:
         st.warning("Konfigurasi Google Drive belum lengkap pada secrets.toml.")
 
-    storage_model_ready = not is_trafo_two_sheet
-    if is_trafo_two_sheet:
-        st.warning(
-            "Penyimpanan Bay Trafo sementara dikunci karena satu inspeksi menggunakan dua sheet, "
-            "sedangkan transaksi saat ini masih mempunyai satu source_sheet_name."
-        )
-
     ready = (
-        storage_model_ready
-        and
         mapping_complete
         and validation_approved
         and review_confirmed
@@ -773,7 +764,7 @@ with st.container(border=True):
                     service_account_info=service_account,
                     template_code=template_code,
                     parsed_sheets=mapped_parsed,
-                    sheet_to_bay=sheet_to_bay,
+                    sheet_assignments=sheet_assignments,
                     metadata_by_bay=metadata_by_bay,
                     executor=executor,
                     notes=notes,

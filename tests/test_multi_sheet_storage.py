@@ -39,7 +39,7 @@ def test_two_trafo_sheets_create_one_inspection():
     assert [item["sheet_role_code"] for item in groups[0]["sheets"]] == ["TRAFO", "BAY"]
 
 
-def test_plan_item_is_attached_to_the_matching_inspection():
+def test_work_type_and_stage_are_attached_to_inspection():
     groups = prepare_inspection_groups(
         upload_id="00000000-0000-0000-0000-000000000001",
         template_code="PHT_V1",
@@ -51,9 +51,11 @@ def test_plan_item_is_attached_to_the_matching_inspection():
         executor="Tester",
         notes=None,
         user_id="00000000-0000-0000-0000-000000000002",
-        plan_item_by_bay={"BAY-1": "00000000-0000-0000-0000-000000000099"},
+        work_type="ROUTINE",
+        stage_code="TAHAP_2",
     )
-    assert groups[0]["inspection"]["plan_item_id"] == "00000000-0000-0000-0000-000000000099"
+    assert groups[0]["inspection"]["work_type"] == "ROUTINE"
+    assert groups[0]["inspection"]["stage_code"] == "TAHAP_2"
 
 
 def test_same_role_cannot_be_assigned_twice_to_one_bay():

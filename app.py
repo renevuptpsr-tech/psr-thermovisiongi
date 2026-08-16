@@ -15,14 +15,13 @@ from thermovisi.mapping import (
     sheet_mapping_from_bays,
     trafo_sheet_mapping_from_bays,
 )
-from thermovisi.planning_page import render_planning_page
+from thermovisi.monitoring_page import render_upload_monitoring_page
 from thermovisi.google_drive import normalize_drive_folder_id, validate_gateway_config
 from thermovisi.review import build_sheet_review, compact_review_rows, style_compact_review
 from thermovisi.review_validator import validate_bay_review, validation_summary_row
 from thermovisi.supabase_service import (
     fetch_bays,
     fetch_gi,
-    fetch_outstanding_plan_items,
     fetch_template_items,
     fetch_templates,
     fetch_ultg,
@@ -206,45 +205,30 @@ with st.sidebar:
     st.divider()
     active_page = st.radio(
         "Menu",
-        ["Import inspeksi", "Rencana & monitoring"],
+        ["Import inspeksi", "Monitoring upload"],
         key="active_page",
     )
 
-if active_page == "Rencana & monitoring":
-    render_planning_page(
+if active_page == "Monitoring upload":
+    render_upload_monitoring_page(
         client,
         ultg_rows=ultg_rows,
-        user_id=st.session_state.auth["user_id"],
     )
     st.stop()
 
 with st.container(border=True):
-    st.markdown("### Sumber pekerjaan")
-    source_1, source_2, source_3, source_4 = st.columns([1.2, 1.5, 1.3, 1.2])
+    st.markdown("### Klasifikasi inspeksi")
+    source_1, source_2 = st.columns(2)
     with source_1:
-        use_plan = st.toggle(
-            "Gunakan rencana inspeksi",
-            value=True,
-            help="Jika aktif, hanya Bay yang masih outstanding pada rencana terpilih yang ditampilkan.",
-        )
-    with source_2:
-        plan_period = st.date_input(
-            "Periode rencana",
-            value=date.today().replace(day=1),
-            disabled=not use_plan,
-        ).replace(day=1)
-    with source_3:
         import_work_type = st.selectbox(
             "Jenis pekerjaan",
             ["ROUTINE", "FOLLOW_UP", "URGENT"],
-            disabled=not use_plan,
             key="import_work_type",
         )
-    with source_4:
+    with source_2:
         import_stage = st.selectbox(
             "Tahap",
             ["TAHAP_1", "TAHAP_2"] if import_work_type == "ROUTINE" else ["ADHOC"],
-            disabled=not use_plan,
             key=f"import_stage_{import_work_type}",
         )
 
@@ -281,39 +265,16 @@ with st.container(border=True):
     gi_flc = gi_options.get(gi_choice)
 
     bay_rows = []
-    plan_rows: list[dict[str, Any]] = []
-    plan_item_by_bay: dict[str, str] = {}
     if ultg_flc and gi_flc:
         bay_cache_key = f"{ultg_flc}|{gi_flc}"
         try:
             if bay_cache_key not in reference_cache["bays"]:
                 reference_cache["bays"][bay_cache_key] = fetch_bays(client, ultg_flc, gi_flc)
             bay_rows = reference_cache["bays"][bay_cache_key]
-            if use_plan:
-                plan_rows = fetch_outstanding_plan_items(
-                    client,
-                    period_month=plan_period,
-                    ultg_flc=ultg_flc,
-                    gi_flc=gi_flc,
-                    work_type=import_work_type,
-                    stage_code=import_stage,
-                )
-                plan_item_by_bay = {
-                    str(row["bay_flc"]): str(row["plan_item_id"]) for row in plan_rows
-                }
-                bay_rows = [
-                    row for row in bay_rows if str(row["bay_flc"]) in plan_item_by_bay
-                ]
         except Exception as exc:
             stop_for_reference_error(exc)
     with location_3:
-        st.metric("Bay outstanding" if use_plan else "Bay tersedia", len(bay_rows))
-
-    if use_plan and ultg_flc and gi_flc and not bay_rows:
-        st.info(
-            "Tidak ada Bay outstanding pada rencana yang dipilih. "
-            "Periksa periode/tahap atau tambahkan Bay melalui menu Rencana & monitoring."
-        )
+        st.metric("Bay tersedia", len(bay_rows))
 
     all_bay_labels = [bay_label(row) for row in bay_rows]
     selected_labels = st.multiselect(
@@ -377,14 +338,6 @@ with st.container(border=True):
         key=f"metadata_editor_{gi_flc}_{'_'.join(selected_bay_ids)}",
     )
     metadata_by_bay, metadata_errors = metadata_from_editor(metadata_editor)
-    if use_plan:
-        for bay_id, metadata in metadata_by_bay.items():
-            measured = metadata["measurement_date"]
-            if (measured.year, measured.month) != (plan_period.year, plan_period.month):
-                metadata_errors.append(
-                    f"Tanggal pelaksanaan Bay {bay_id} harus berada pada periode "
-                    f"{plan_period.strftime('%m/%Y')}."
-                )
     for message in metadata_errors:
         st.error(message)
 
@@ -875,11 +828,8 @@ with st.container(border=True):
                     executor=executor,
                     notes=notes,
                     user_id=st.session_state.auth["user_id"],
-                    plan_item_by_bay=(
-                        {bay_id: plan_item_by_bay[bay_id] for bay_id in selected_bay_ids}
-                        if use_plan
-                        else None
-                    ),
+                    work_type=import_work_type,
+                    stage_code=import_stage,
                 )
                 st.success(f"Import selesai. Upload ID: {upload_id}")
                 st.session_state.parsed = None

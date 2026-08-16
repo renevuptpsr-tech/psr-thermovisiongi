@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Iterable
 
+from .ahi import ahi_from_severity
 from .excel_parser import ParsedSheet
 from .rules_trafo import (
     RULE_SET_CODE,
@@ -45,6 +46,13 @@ def _apply_results(row: dict[str, Any], results: list[RuleResult]) -> None:
     row["Kesimpulan / rekomendasi"] = " ".join(recommendations)
     row["Basis evaluasi"] = governing.evaluation_basis or "DIRECT_TEMPERATURE"
     row["Tingkat perhatian"] = governing.severity
+    ahi = ahi_from_severity(
+        governing.severity,
+        evaluable=str(row.get("Status data") or "").upper() != "INVALID",
+    )
+    row["AHI Thermovisi"] = ahi.score if ahi else None
+    row["Kategori AHI"] = ahi.label if ahi else None
+    row["Basis AHI"] = RULE_SET_CODE if ahi else None
 
 
 def _temperature_map(measurements: list[Any]) -> dict[str, float]:
@@ -132,6 +140,9 @@ def build_sheet_review(
                 "Kondisi": "",
                 "Kesimpulan / rekomendasi": "",
                 "Tingkat perhatian": 0,
+                "AHI Thermovisi": None,
+                "Kategori AHI": None,
+                "Basis AHI": None,
                 "Status analisa": "BELUM DIEVALUASI",
                 "Status data": status,
             }
@@ -369,6 +380,14 @@ def compact_review_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         equipment = "" if equipment_key == previous_equipment else str(row.get("Peralatan") or "")
         previous_equipment = equipment_key
         data_status = str(row.get("Status data") or "")
+        ahi_score = row.get("AHI Thermovisi")
+        ahi_label = row.get("Kategori AHI")
+        if ahi_score is not None and ahi_label:
+            ahi_display = f"{int(ahi_score)} — {ahi_label}"
+        elif data_status.upper() == "INVALID":
+            ahi_display = "Tidak dapat dievaluasi"
+        else:
+            ahi_display = "—"
         compact.append(
             {
                 "No.": row.get("No."),
@@ -377,6 +396,7 @@ def compact_review_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "Pengukuran": measurement,
                 "Delta T": " · ".join(analysis_parts) or "—",
                 "Kondisi": row.get("Kondisi") or "—",
+                "AHI Thermovisi": ahi_display,
                 "Kesimpulan / Rekomendasi": row.get("Kesimpulan / rekomendasi") or "—",
                 "Status Data": data_status or "—",
             }

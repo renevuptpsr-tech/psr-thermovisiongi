@@ -28,10 +28,16 @@ def inspection(**overrides):
 def validate(*, selected=None, inspections=None, sheets=None, **overrides):
     _validate_incremental_import(
         existing_upload=upload(**overrides),
-        existing_inspections=inspections or [inspection()],
-        existing_sheets=sheets or [{"source_sheet_name": "Sheet 1"}],
+        existing_inspections=(
+            inspections if inspections is not None else [inspection()]
+        ),
+        existing_sheets=(
+            sheets if sheets is not None else [{"source_sheet_name": "Sheet 1"}]
+        ),
         template_code="PHT_150_STANDARD_V1",
-        selected_sheet_names=selected or {"Sheet 3", "Sheet 4"},
+        selected_sheet_names=(
+            selected if selected is not None else {"Sheet 3", "Sheet 4"}
+        ),
         destination_year=2026,
         destination_month=8,
         work_type="ROUTINE",
@@ -49,7 +55,10 @@ def test_used_sheet_is_rejected_even_with_case_or_outer_spaces():
 
 
 def test_incremental_import_must_keep_template_period_and_stage():
-    with pytest.raises(ValueError, match="bukan TRAFO"):
+    with pytest.raises(
+        ValueError,
+        match="template TRAFO, bukan PHT_150_STANDARD_V1",
+    ):
         validate(template_type="TRAFO")
     with pytest.raises(ValueError, match="periode"):
         validate(inspections=[inspection(measurement_date=date(2026, 7, 31).isoformat())])

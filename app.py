@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from thermovisi.ahi import aggregate_ahi
 from thermovisi.excel_parser import parse_workbook
 from thermovisi.mapping import (
     TRAFO_TWO_SHEET_MODE,
@@ -612,6 +613,9 @@ with st.container(border=True):
                             "Delta T", width="large"
                         ),
                         "Kondisi": st.column_config.TextColumn("Kondisi", width="medium"),
+                        "AHI Thermovisi": st.column_config.TextColumn(
+                            "AHI Thermovisi", width="medium"
+                        ),
                         "Kesimpulan / Rekomendasi": st.column_config.TextColumn(
                             "Kesimpulan / Rekomendasi", width="large"
                         ),
@@ -632,10 +636,15 @@ with st.container(border=True):
             int(row.get("Tingkat perhatian") or 0) > 0 for row in all_review_rows
         )
         invalid_review = sum(row["Status data"] == "INVALID" for row in all_review_rows)
-        summary_1, summary_2, summary_3 = st.columns(3)
+        bay_ahi = aggregate_ahi(row.get("AHI Thermovisi") for row in all_review_rows)
+        summary_1, summary_2, summary_3, summary_4 = st.columns(4)
         summary_1.metric("Total baris review", len(all_review_rows))
         summary_2.metric("Perlu perhatian", abnormal_count)
         summary_3.metric("Data invalid", invalid_review)
+        summary_4.metric(
+            "AHI Bay Thermovisi",
+            bay_ahi.display if bay_ahi else "Tidak dapat dievaluasi",
+        )
 
     st.divider()
     st.markdown("#### Validasi sebelum penyimpanan")

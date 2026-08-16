@@ -68,7 +68,9 @@ def render_upload_monitoring_page(
     period_start = date(year, month, 1)
     period_end = _next_month(period_start)
     try:
-        eligible = fetch_eligible_bays(client, ultg_flc=ultg_flc)
+        eligible = fetch_eligible_bays(
+            client, ultg_flc=ultg_flc, required_only=True
+        )
         selected_stages = (
             ["TAHAP_1", "TAHAP_2"]
             if stage_filter == "SEMUA_TAHAP"

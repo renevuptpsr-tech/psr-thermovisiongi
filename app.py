@@ -8,7 +8,12 @@ import pandas as pd
 import streamlit as st
 
 from thermovisi.excel_parser import parse_workbook
-from thermovisi.mapping import trafo_sheet_mapping_from_bays
+from thermovisi.mapping import (
+    TRAFO_TWO_SHEET_MODE,
+    mapping_mode_from_template,
+    sheet_mapping_from_bays,
+    trafo_sheet_mapping_from_bays,
+)
 from thermovisi.review import build_sheet_review, compact_review_rows, style_compact_review
 from thermovisi.supabase_service import (
     fetch_bays,
@@ -378,10 +383,24 @@ if not parsed:
     st.stop()
 
 with st.container(border=True):
-    st.markdown("### 4 · Pasangkan dua sheet untuk setiap Bay Trafo")
+    template_items = reference_cache["template_items"][template_code]
+    mapping_mode = mapping_mode_from_template(template_meta, template_items)
+    is_trafo_two_sheet = mapping_mode == TRAFO_TWO_SHEET_MODE
+    st.markdown(
+        "### 4 · Pasangkan dua sheet untuk setiap Bay Trafo"
+        if is_trafo_two_sheet
+        else "### 4 · Pasangkan sheet ke Bay"
+    )
     st.caption(
-        "Setiap Bay Trafo mempunyai Sheet Trafo dan Sheet Bay. Nama sheet bebas; "
-        "aplikasi memvalidasi bagian form berdasarkan isi titik ukurnya."
+        (
+            "Template Trafo menggunakan Sheet Trafo dan Sheet Bay untuk setiap Bay. "
+            "Nama sheet bebas; aplikasi memvalidasi bagian form dari isi titik ukurnya."
+        )
+        if is_trafo_two_sheet
+        else (
+            "Template non-Trafo menggunakan satu sheet untuk setiap Bay. "
+            "Pilih sheet tujuan tanpa harus menyeragamkan nama sheet."
+        )
     )
     sheet_names = [parsed_sheet.sheet_name for parsed_sheet in parsed]
     sheet_sections = {
@@ -390,41 +409,77 @@ with st.container(border=True):
         }
         for parsed_sheet in parsed
     }
-    mapping_seed = pd.DataFrame(
-        [
-            {
-                "bay_flc": row["bay_flc"],
-                "Bay": bay_label(row),
-                "Sheet Trafo": None,
-                "Sheet Bay": None,
+    if is_trafo_two_sheet:
+        mapping_seed = pd.DataFrame(
+            [
+                {
+                    "bay_flc": row["bay_flc"],
+                    "Bay": bay_label(row),
+                    "Sheet Trafo": None,
+                    "Sheet Bay": None,
+                }
+                for row in selected_bay_rows
+            ]
+        )
+        mapping_editor = st.data_editor(
+            mapping_seed,
+            hide_index=True,
+            width="stretch",
+            num_rows="fixed",
+            disabled=["bay_flc", "Bay"],
+            column_config={
+                "bay_flc": None,
+                "Bay": st.column_config.TextColumn("Bay tujuan", width="large"),
+                "Sheet Trafo": st.column_config.SelectboxColumn(
+                    "Sheet Trafo", options=sheet_names, width="large", required=True
+                ),
+                "Sheet Bay": st.column_config.SelectboxColumn(
+                    "Sheet Bay", options=sheet_names, width="large", required=True
+                ),
+            },
+            key=f"bay_sheet_mapping_trafo_{digest}_{'_'.join(selected_bay_ids)}",
+        )
+        sheet_assignments, mapping_errors = trafo_sheet_mapping_from_bays(
+            mapping_editor.to_dict("records"),
+            expected_bay_ids=selected_bay_ids,
+            valid_sheet_names=sheet_names,
+            sheet_sections=sheet_sections,
+        )
+    else:
+        mapping_seed = pd.DataFrame(
+            [
+                {"bay_flc": row["bay_flc"], "Bay": bay_label(row), "Sheet Excel": None}
+                for row in selected_bay_rows
+            ]
+        )
+        mapping_editor = st.data_editor(
+            mapping_seed,
+            hide_index=True,
+            width="stretch",
+            num_rows="fixed",
+            disabled=["bay_flc", "Bay"],
+            column_config={
+                "bay_flc": None,
+                "Bay": st.column_config.TextColumn("Bay tujuan", width="large"),
+                "Sheet Excel": st.column_config.SelectboxColumn(
+                    "Sheet hasil pengukuran", options=sheet_names, width="large", required=True
+                ),
+            },
+            key=f"bay_sheet_mapping_single_{digest}_{'_'.join(selected_bay_ids)}",
+        )
+        single_mapping, mapping_errors = sheet_mapping_from_bays(
+            mapping_editor.to_dict("records"),
+            expected_bay_ids=selected_bay_ids,
+            valid_sheet_names=sheet_names,
+        )
+        sheet_assignments = {
+            sheet_name: {
+                "bay_flc": bay_id,
+                "sheet_role": "MAIN",
+                "form_section_code": next(iter(sheet_sections.get(sheet_name, {"MAIN"}))),
             }
-            for row in selected_bay_rows
-        ]
-    )
-    mapping_editor = st.data_editor(
-        mapping_seed,
-        hide_index=True,
-        width="stretch",
-        num_rows="fixed",
-        disabled=["bay_flc", "Bay"],
-        column_config={
-            "bay_flc": None,
-            "Bay": st.column_config.TextColumn("Bay tujuan", width="large"),
-            "Sheet Trafo": st.column_config.SelectboxColumn(
-                "Sheet Trafo", options=sheet_names, width="large", required=True
-            ),
-            "Sheet Bay": st.column_config.SelectboxColumn(
-                "Sheet Bay", options=sheet_names, width="large", required=True
-            ),
-        },
-        key=f"bay_sheet_mapping_{digest}_{'_'.join(selected_bay_ids)}",
-    )
-    sheet_assignments, mapping_errors = trafo_sheet_mapping_from_bays(
-        mapping_editor.to_dict("records"),
-        expected_bay_ids=selected_bay_ids,
-        valid_sheet_names=sheet_names,
-        sheet_sections=sheet_sections,
-    )
+            for sheet_name, bay_id in single_mapping.items()
+        }
     for message in mapping_errors:
         st.warning(message)
     mapping_complete = not mapping_errors
@@ -441,21 +496,34 @@ with st.container(border=True):
         ] = sheet_name
     mapped_parsed = [parsed_by_name[name] for name in sheet_to_bay if name in parsed_by_name]
     if mapping_complete:
-        confirmation_rows = [
-            {
-                "Bay": bay_label(row),
-                "Sheet Trafo": assignments_by_bay[row["bay_flc"]]["TRAFO"],
-                "Nilai Trafo": parsed_by_name[
-                    assignments_by_bay[row["bay_flc"]]["TRAFO"]
-                ].numeric_count,
-                "Sheet Bay": assignments_by_bay[row["bay_flc"]]["BAY"],
-                "Nilai Bay": parsed_by_name[
-                    assignments_by_bay[row["bay_flc"]]["BAY"]
-                ].numeric_count,
-            }
-            for row in selected_bay_rows
-        ]
-        st.success("Pemetaan dua sheet lengkap. Periksa kembali pasangan Bay sebelum review.")
+        if is_trafo_two_sheet:
+            confirmation_rows = [
+                {
+                    "Bay": bay_label(row),
+                    "Sheet Trafo": assignments_by_bay[row["bay_flc"]]["TRAFO"],
+                    "Nilai Trafo": parsed_by_name[
+                        assignments_by_bay[row["bay_flc"]]["TRAFO"]
+                    ].numeric_count,
+                    "Sheet Bay": assignments_by_bay[row["bay_flc"]]["BAY"],
+                    "Nilai Bay": parsed_by_name[
+                        assignments_by_bay[row["bay_flc"]]["BAY"]
+                    ].numeric_count,
+                }
+                for row in selected_bay_rows
+            ]
+            st.success("Pemetaan dua sheet Trafo lengkap. Periksa kembali pasangan Bay.")
+        else:
+            confirmation_rows = [
+                {
+                    "Bay": bay_label(row),
+                    "Sheet Excel": assignments_by_bay[row["bay_flc"]]["MAIN"],
+                    "Nilai suhu": parsed_by_name[
+                        assignments_by_bay[row["bay_flc"]]["MAIN"]
+                    ].numeric_count,
+                }
+                for row in selected_bay_rows
+            ]
+            st.success("Pemetaan satu sheet per Bay lengkap. Periksa kembali sebelum review.")
         st.dataframe(pd.DataFrame(confirmation_rows), hide_index=True, width="stretch")
 
     ignored_sheets = [name for name in sheet_names if name not in sheet_to_bay]
@@ -467,15 +535,23 @@ total_invalid = sum(sheet.invalid_count for sheet in mapped_parsed)
 with st.container(border=True):
     st.markdown("### 5 · Review hasil dan analisa")
     st.caption(
-        "Pilih satu Bay. Sheet Trafo dan Sheet Bay ditampilkan pada tab terpisah dengan "
-        "kolom pengukuran yang sudah diringkas."
+        (
+            "Pilih satu Bay. Sheet Trafo dan Sheet Bay ditampilkan pada tab terpisah."
+            if is_trafo_two_sheet
+            else "Pilih satu Bay untuk menampilkan sheet hasil pengukurannya."
+        )
     )
 
     selected_bay_by_id = {row["bay_flc"]: row for row in selected_bay_rows}
     review_options = {
         bay_label(selected_bay_by_id[bay_id]): bay_id
         for bay_id in assignments_by_bay
-        if bay_id in selected_bay_by_id and {"TRAFO", "BAY"}.issubset(assignments_by_bay[bay_id])
+        if bay_id in selected_bay_by_id
+        and (
+            {"TRAFO", "BAY"}.issubset(assignments_by_bay[bay_id])
+            if is_trafo_two_sheet
+            else "MAIN" in assignments_by_bay[bay_id]
+        )
     }
     review_choice = st.selectbox(
         "Bay yang direview",
@@ -496,11 +572,11 @@ with st.container(border=True):
         info_2.metric("Beban tertinggi", f"{review_metadata['monthly_peak_current_a']:.2f} A")
         info_3.metric("Suhu lingkungan", f"{review_metadata['ambient_temperature_c']:.1f} °C")
 
-        tabs = st.tabs(["Trafo Utama", "Bay Trafo"])
-        role_config = (
-            (tabs[0], "TRAFO", "Sheet Trafo"),
-            (tabs[1], "BAY", "Sheet Bay"),
-        )
+        if is_trafo_two_sheet:
+            tabs = st.tabs(["Trafo Utama", "Bay Trafo"])
+            role_config = ((tabs[0], "TRAFO", "Sheet Trafo"), (tabs[1], "BAY", "Sheet Bay"))
+        else:
+            role_config = ((st.container(), "MAIN", "Sheet hasil pengukuran"),)
         for tab, role, role_label in role_config:
             with tab:
                 review_sheet_name = assignments_by_bay[review_bay_id][role]
@@ -585,15 +661,15 @@ with st.container(border=True):
     if not service_account or not drive_folder_id:
         st.warning("Konfigurasi Google Drive belum lengkap pada secrets.toml.")
 
-    two_sheet_storage_ready = False
-    st.warning(
-        "Penyimpanan sementara dikunci. Satu inspeksi Bay Trafo sekarang mempunyai dua sheet, "
-        "sedangkan struktur transaksi saat ini masih menyimpan satu source_sheet_name per inspeksi. "
-        "Review dan analisa tetap dapat digunakan."
-    )
+    storage_model_ready = not is_trafo_two_sheet
+    if is_trafo_two_sheet:
+        st.warning(
+            "Penyimpanan Bay Trafo sementara dikunci karena satu inspeksi menggunakan dua sheet, "
+            "sedangkan transaksi saat ini masih mempunyai satu source_sheet_name."
+        )
 
     ready = (
-        two_sheet_storage_ready
+        storage_model_ready
         and
         mapping_complete
         and review_confirmed

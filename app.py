@@ -15,12 +15,7 @@ from thermovisi.mapping import (
     sheet_mapping_from_bays,
     trafo_sheet_mapping_from_bays,
 )
-from thermovisi.google_drive import (
-    disconnect_drive,
-    load_drive_credentials,
-    normalize_drive_folder_id,
-    normalize_oauth_client_config,
-)
+from thermovisi.google_drive import normalize_drive_folder_id, validate_gateway_config
 from thermovisi.review import build_sheet_review, compact_review_rows, style_compact_review
 from thermovisi.review_validator import validate_bay_review, validation_summary_row
 from thermovisi.supabase_service import (
@@ -743,42 +738,23 @@ with st.container(border=True):
     drive_folder_id = normalize_drive_folder_id(
         str(drive_info.get("folder_id", "")) if drive_info else ""
     )
-    oauth_raw = dict(st.secrets.get("google_oauth", {}))
-    oauth_config: dict[str, Any] = {}
-    drive_credentials = None
-    oauth_error: str | None = None
+    drive_web_app_url = str(drive_info.get("web_app_url", "")).strip() if drive_info else ""
+    drive_shared_secret = (
+        str(drive_info.get("shared_secret", "")).strip() if drive_info else ""
+    )
+    gateway_error: str | None = None
     try:
-        oauth_config = normalize_oauth_client_config(oauth_raw)
-        drive_credentials = load_drive_credentials(oauth_config)
-    except Exception as exc:
-        oauth_error = str(exc)
+        validate_gateway_config(drive_web_app_url, drive_shared_secret)
+    except ValueError as exc:
+        gateway_error = str(exc)
     if total_invalid:
         st.error("Penyimpanan diblokir karena masih ada data INVALID. Perbaiki Excel atau template lalu validasi ulang.")
-    if oauth_error:
-        st.error(f"Konfigurasi OAuth Google Drive tidak valid: {oauth_error}")
+    if gateway_error:
+        st.error(f"Konfigurasi gateway Google Drive tidak valid: {gateway_error}")
     if not drive_folder_id:
         st.warning("google_drive.folder_id belum dikonfigurasi pada secrets.toml.")
-    if oauth_config and not oauth_error:
-        if drive_credentials:
-            drive_col_1, drive_col_2 = st.columns([3, 1])
-            with drive_col_1:
-                st.success("Google Drive sudah terhubung.")
-            with drive_col_2:
-                if st.button("Putuskan Drive", width="stretch"):
-                    disconnect_drive()
-                    st.rerun()
-        else:
-            st.info(
-                "Google Drive belum terhubung. Login dilakukan melalui browser "
-                "dan token disimpan hanya di komputer ini."
-            )
-            if st.button("Hubungkan Google Drive", type="secondary", width="stretch"):
-                try:
-                    with st.spinner("Menunggu login dan persetujuan Google..."):
-                        load_drive_credentials(oauth_config, interactive=True)
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Google Drive tidak dapat dihubungkan: {exc}")
+    if not gateway_error and drive_folder_id:
+        st.success("Gateway Apps Script Google Drive siap digunakan.")
 
     ready = (
         mapping_complete
@@ -786,8 +762,9 @@ with st.container(border=True):
         and review_confirmed
         and not metadata_errors
         and total_invalid == 0
-        and bool(drive_credentials)
-        and not oauth_error
+        and not gateway_error
+        and bool(drive_web_app_url)
+        and bool(drive_shared_secret)
         and bool(drive_folder_id)
         and bool(template_meta)
     )
@@ -801,7 +778,8 @@ with st.container(border=True):
                     mime_type=uploaded.type
                     or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     folder_id=drive_folder_id,
-                    drive_credentials=drive_credentials,
+                    drive_web_app_url=drive_web_app_url,
+                    drive_shared_secret=drive_shared_secret,
                     template_code=template_code,
                     parsed_sheets=mapped_parsed,
                     sheet_assignments=sheet_assignments,

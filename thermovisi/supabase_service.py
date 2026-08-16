@@ -132,7 +132,8 @@ def save_import(
     filename: str,
     mime_type: str,
     folder_id: str,
-    drive_credentials: Any,
+    drive_web_app_url: str,
+    drive_shared_secret: str,
     template_code: str,
     parsed_sheets: list[ParsedSheet],
     sheet_assignments: dict[str, dict[str, str]],
@@ -158,7 +159,14 @@ def save_import(
         user_id=user_id,
     )
 
-    drive = upload_excel(file_bytes, filename, mime_type, folder_id, drive_credentials)
+    drive = upload_excel(
+        file_bytes,
+        filename,
+        mime_type,
+        folder_id,
+        web_app_url=drive_web_app_url,
+        shared_secret=drive_shared_secret,
+    )
     upload_row = {
         "upload_id": upload_id,
         "file_provider": "GOOGLE_DRIVE",

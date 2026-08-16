@@ -54,9 +54,14 @@ def render_upload_monitoring_page(
         ultg_flc = ultg_options[ultg_label]
         work_type = "ROUTINE"
         with c4:
-            stage_code = st.selectbox(
+            stage_filter = st.selectbox(
                 "Tahap",
-                ["TAHAP_1", "TAHAP_2"],
+                ["SEMUA_TAHAP", "TAHAP_1", "TAHAP_2"],
+                format_func=lambda value: {
+                    "SEMUA_TAHAP": "Semua Tahap",
+                    "TAHAP_1": "Tahap 1",
+                    "TAHAP_2": "Tahap 2",
+                }[value],
                 key="monitor_routine_stage",
             )
 
@@ -64,23 +69,33 @@ def render_upload_monitoring_page(
     period_end = _next_month(period_start)
     try:
         eligible = fetch_eligible_bays(client, ultg_flc=ultg_flc)
-        inspections = fetch_inspection_completions(
-            client,
-            period_start=period_start,
-            period_end=period_end,
-            work_type=work_type,
-            stage_code=stage_code,
+        selected_stages = (
+            ["TAHAP_1", "TAHAP_2"]
+            if stage_filter == "SEMUA_TAHAP"
+            else [stage_filter]
         )
+        rows: list[dict[str, Any]] = []
+        for stage_code in selected_stages:
+            inspections = fetch_inspection_completions(
+                client,
+                period_start=period_start,
+                period_end=period_end,
+                work_type=work_type,
+                stage_code=stage_code,
+            )
+            stage_rows = build_upload_monitoring_rows(eligible, inspections)
+            for row in stage_rows:
+                row["Tahap"] = "Tahap 1" if stage_code == "TAHAP_1" else "Tahap 2"
+            rows.extend(stage_rows)
     except Exception as exc:
         st.error(f"Data monitoring tidak dapat dibaca: {exc}")
         return
 
-    rows = build_upload_monitoring_rows(eligible, inspections)
     completed = sum(row["Status upload"] == "SUDAH UPLOAD" for row in rows)
     outstanding = len(rows) - completed
     percent = 100.0 * completed / len(rows) if rows else 0.0
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Bay wajib rutin", len(rows))
+    m1.metric("Kewajiban inspeksi", len(rows))
     m2.metric("Sudah upload", completed)
     m3.metric("Belum upload", outstanding)
     m4.metric("Realisasi", f"{percent:.1f}%")
@@ -94,7 +109,7 @@ def render_upload_monitoring_page(
             Selesai=(detail["Status upload"] == "SUDAH UPLOAD").astype(int),
             Belum=(detail["Status upload"] == "BELUM UPLOAD").astype(int),
         )
-        .groupby(["ULTG", "Gardu Induk"], as_index=False)
+        .groupby(["ULTG", "Gardu Induk", "Tahap"], as_index=False)
         .agg(**{"Total Bay": ("Bay", "count"), "Sudah upload": ("Selesai", "sum"), "Belum upload": ("Belum", "sum")})
     )
     summary["Realisasi (%)"] = (
@@ -105,7 +120,7 @@ def render_upload_monitoring_page(
         ["Bay belum upload", "Ringkasan per GI", "Seluruh Bay"]
     )
     visible = [
-        "ULTG", "Gardu Induk", "Bay", "Fungsi", "Tegangan",
+        "ULTG", "Gardu Induk", "Bay", "Tahap", "Fungsi", "Tegangan",
         "Status upload", "Tanggal pelaksanaan", "Pukul",
     ]
     with tab_missing:
@@ -120,6 +135,7 @@ def render_upload_monitoring_page(
         st.dataframe(detail[visible], hide_index=True, width="stretch")
 
     st.caption(
-        f"Periode {MONTH_NAMES[month]} {year} · ROUTINE · {stage_code} · "
+        f"Periode {MONTH_NAMES[month]} {year} · ROUTINE · "
+        f"{'Semua Tahap' if stage_filter == 'SEMUA_TAHAP' else rows[0]['Tahap'] if rows else stage_filter} · "
         f"{calendar.monthrange(year, month)[1]} hari kalender"
     )

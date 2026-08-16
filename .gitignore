@@ -18,7 +18,6 @@ venv/
 *service-account*.json
 *service_account*.json
 credentials.json
-.streamlit/google_drive_token.json
 
 # IDE / OS
 .vscode/

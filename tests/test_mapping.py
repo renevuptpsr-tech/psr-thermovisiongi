@@ -88,3 +88,17 @@ def test_trafo_and_bay_sheet_cannot_be_swapped():
 
     assert any("Sheet Trafo" in error and "bagian B" in error for error in errors)
     assert any("Sheet Bay" in error and "bagian A" in error for error in errors)
+
+
+def test_hidden_spaces_in_sheet_name_are_resolved_to_actual_workbook_name():
+    actual_name = "TD\u00a02 "
+    mapping, errors = trafo_sheet_mapping_from_bays(
+        [{"bay_flc": "BAY-01", "Sheet Trafo": "TD 1", "Sheet Bay": "td 2"}],
+        expected_bay_ids=["BAY-01"],
+        valid_sheet_names=["TD 1", actual_name],
+        sheet_sections=None,
+    )
+
+    assert errors == []
+    assert actual_name in mapping
+    assert mapping[actual_name]["sheet_role"] == "BAY"

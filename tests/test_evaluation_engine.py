@@ -61,3 +61,18 @@ def test_invalid_pair_configuration_is_not_evaluated():
     )
     assert patches == []
     assert statuses[1] == "INCOMPLETE_PAIR"
+
+
+def test_pmt_insulator_is_evaluated_as_phase_group():
+    items = [{
+        "template_item_id": 1, "analysis_rule_code": "PMT_INSULATOR",
+        "point_code": "PMT_INSULATOR", "comparison_group_code": None,
+    }]
+    patches, statuses = build_evaluation_patches(
+        items,
+        [measurement(1, "R", 40), measurement(1, "S", 42), measurement(1, "T", 41)],
+        measurement_current_a=100, monthly_peak_current_a=200, ambient_temperature_c=30,
+    )
+    assert not statuses
+    assert patches[0].values["Rule set"] == "THERMOVISI_PMT_V1"
+    assert patches[0].values["Kode aturan"] == "PMT_INSULATOR_NETA"

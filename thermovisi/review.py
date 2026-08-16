@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 from .ahi import ahi_from_severity
+from .evaluation_engine import build_evaluation_patches
 from .excel_parser import ParsedSheet
 from .rules_trafo import (
     RULE_SET_CODE,
@@ -120,6 +121,7 @@ def build_sheet_review(
         rows.append(
             {
                 "No.": int(item.get("sequence_no") or 0),
+                "Template item ID": item_id,
                 "Bagian": item.get("form_section_code"),
                 "Peralatan": item.get("raw_equipment_label") or item.get("equipment_group_code"),
                 "Titik peralatan yang diperiksa": item.get("raw_point_label"),
@@ -332,6 +334,26 @@ def build_sheet_review(
             row["Metode analisa"] = "DATA PROFIL GRADASI"
             row["Status analisa"] = "TERCAKUP PADA GRADASI"
 
+    patches, engine_statuses = build_evaluation_patches(
+        template_items,
+        parsed_sheet.measurements,
+        measurement_current_a=measurement_current_a,
+        monthly_peak_current_a=monthly_peak_current_a,
+        ambient_temperature_c=ambient_temperature_c,
+    )
+    for patch in patches:
+        rows[row_index_by_item[patch.target_item_id]].update(patch.values)
+        for covered_id in patch.covered_item_ids:
+            covered_row = rows[row_index_by_item[covered_id]]
+            covered_row["Metode analisa"] = "REFERENSI PASANGAN"
+            covered_row["Status analisa"] = "TERCAKUP PADA PASANGAN"
+    for item_id, status in engine_statuses.items():
+        row = rows[row_index_by_item[item_id]]
+        if row["Status analisa"] == "BELUM DIEVALUASI":
+            row["Status analisa"] = status
+            if status == "RULE_NOT_CONFIGURED":
+                row["Kesimpulan / rekomendasi"] = "Rule analisis belum dikonfigurasi untuk titik ini."
+
     return rows
 
 
@@ -409,6 +431,7 @@ def compact_review_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "Kondisi": row.get("Kondisi") or "—",
                 "AHI Thermovisi": ahi_display,
                 "Kesimpulan / Rekomendasi": row.get("Kesimpulan / rekomendasi") or "—",
+                "Status Analisa": row.get("Status analisa") or "—",
                 "Status Data": data_status or "—",
             }
         )
@@ -422,8 +445,9 @@ def style_compact_review(frame):
 
 def compact_review_row_style(row) -> list[str]:
     status = str(row.get("Status Data") or "").upper()
+    analysis_status = str(row.get("Status Analisa") or "").upper()
     styles = [""] * len(row)
-    target_columns = {"Pengukuran", "Status Data"}
+    target_columns = {"Pengukuran", "Status Analisa", "Status Data"}
     if status == "INVALID":
         css = "background-color: #FEE2E2; color: #991B1B; font-weight: 600"
     elif status == "WARNING":
@@ -432,6 +456,8 @@ def compact_review_row_style(row) -> list[str]:
         css = "background-color: #E0F2FE; color: #075985"
     elif status == "NOT_APPLICABLE":
         css = "background-color: #F3F4F6; color: #4B5563"
+    elif analysis_status == "RULE_NOT_CONFIGURED" or analysis_status.startswith("CONFIGURATION_ERROR"):
+        css = "background-color: #FEF3C7; color: #92400E; font-weight: 600"
     else:
         return styles
     for index, column in enumerate(row.index):

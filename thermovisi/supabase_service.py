@@ -134,6 +134,7 @@ def save_import(
     folder_id: str,
     drive_web_app_url: str,
     drive_shared_secret: str,
+    drive_gi_name: str,
     template_code: str,
     parsed_sheets: list[ParsedSheet],
     sheet_assignments: dict[str, dict[str, str]],
@@ -159,11 +160,26 @@ def save_import(
         user_id=user_id,
     )
 
+    periods = {
+        (
+            int(metadata["measurement_date"].year),
+            int(metadata["measurement_date"].month),
+        )
+        for metadata in metadata_by_bay.values()
+    }
+    if len(periods) != 1:
+        raise ValueError(
+            "Semua Bay dalam satu file harus memiliki bulan dan tahun pelaksanaan yang sama."
+        )
+    destination_year, destination_month = next(iter(periods))
     drive = upload_excel(
         file_bytes,
         filename,
         mime_type,
         folder_id,
+        destination_year=destination_year,
+        destination_gi=drive_gi_name,
+        destination_month=destination_month,
         web_app_url=drive_web_app_url,
         shared_secret=drive_shared_secret,
     )

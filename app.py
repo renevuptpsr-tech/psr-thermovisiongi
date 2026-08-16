@@ -792,6 +792,7 @@ with st.container(border=True):
                     parsed_sheets=mapped_parsed,
                     sheet_assignments=sheet_assignments,
                     metadata_by_bay=metadata_by_bay,
+                    review_rows_by_bay=review_rows_by_bay,
                     executor=executor,
                     notes=notes,
                     user_id=st.session_state.auth["user_id"],

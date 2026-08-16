@@ -8,9 +8,11 @@ from typing import Any, Iterable
 from supabase import Client, create_client
 
 from .excel_parser import ParsedSheet
+from .anomaly import build_telegram_anomaly_message, prepare_anomaly_rows
 from .google_drive import upload_excel
 from .retry import retry_read
 from .storage_model import prepare_evaluation_rows, prepare_inspection_groups
+from .telegram import send_telegram_message
 
 
 def make_client(url: str, publishable_key: str, access_token: str | None = None, refresh_token: str | None = None) -> Client:
@@ -193,6 +195,9 @@ def save_import(
     user_id: str,
     work_type: str,
     stage_code: str,
+    telegram_bot_token: str = "",
+    telegram_chat_id: str = "",
+    location_by_bay: dict[str, dict[str, str]] | None = None,
 ) -> str:
     digest = file_sha256(file_bytes)
     duplicate = duplicate_upload(client, digest)
@@ -256,10 +261,13 @@ def save_import(
     try:
         total_measurements = 0
         total_evaluations = 0
+        anomalies_by_inspection: dict[str, list[dict[str, Any]]] = {}
+        prepared_by_inspection: dict[str, dict[str, Any]] = {}
         for prepared in prepared_inspections:
             inspection = prepared["inspection"]
             ambient_c = prepared["ambient_temperature_c"]
             inspection_id = inspection["inspection_id"]
+            prepared_by_inspection[inspection_id] = prepared
             client.table("trx_thermovisi_inspection").insert(inspection).execute()
             for sheet in prepared["sheets"]:
                 parsed = sheet["parsed"]
@@ -313,6 +321,13 @@ def save_import(
                 for batch in _chunks(evaluation_rows):
                     client.table("trx_thermovisi_evaluation").insert(batch).execute()
                 total_evaluations += len(evaluation_rows)
+                anomaly_rows = prepare_anomaly_rows(
+                    inspection_id=inspection_id,
+                    evaluation_rows=evaluation_rows,
+                )
+                for batch in _chunks(anomaly_rows):
+                    client.table("trx_thermovisi_anomaly").insert(batch).execute()
+                anomalies_by_inspection.setdefault(inspection_id, []).extend(anomaly_rows)
 
         client.table("trx_thermovisi_upload").update({
             "processing_status": "COMPLETED",
@@ -324,6 +339,51 @@ def save_import(
             "total_measurements": total_measurements,
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }).eq("upload_id", upload_id).execute()
+
+        if telegram_bot_token.strip() and telegram_chat_id.strip():
+            for inspection_id, anomaly_rows in anomalies_by_inspection.items():
+                if not anomaly_rows:
+                    continue
+                prepared = prepared_by_inspection[inspection_id]
+                bay_id = prepared["bay_id"]
+                location = (location_by_bay or {}).get(bay_id, {})
+                anomaly_ids = [row["anomaly_id"] for row in anomaly_rows]
+                try:
+                    message = build_telegram_anomaly_message(
+                        ultg_name=location.get("ultg_name") or "-",
+                        gi_name=location.get("gi_name") or drive_gi_name,
+                        bay_name=location.get("bay_name") or bay_id,
+                        bay_functloc_id=bay_id,
+                        measurement_date=metadata_by_bay[bay_id]["measurement_date"],
+                        work_type=work_type,
+                        stage_code=stage_code,
+                        anomalies=anomaly_rows,
+                    )
+                    sent = send_telegram_message(
+                        bot_token=telegram_bot_token,
+                        chat_id=telegram_chat_id,
+                        text=message,
+                    )
+                    client.table("trx_thermovisi_anomaly").update({
+                        "notification_status": "SENT",
+                        "telegram_chat_id": sent["chat_id"],
+                        "telegram_message_id": sent["message_id"],
+                        "notification_attempts": 1,
+                        "notification_error": None,
+                        "notified_at": datetime.now(timezone.utc).isoformat(),
+                    }).in_("anomaly_id", anomaly_ids).execute()
+                except Exception as notification_error:
+                    try:
+                        client.table("trx_thermovisi_anomaly").update({
+                            "notification_status": "FAILED",
+                            "telegram_chat_id": telegram_chat_id,
+                            "notification_attempts": 1,
+                            "notification_error": str(notification_error)[:1000],
+                        }).in_("anomaly_id", anomaly_ids).execute()
+                    except Exception:
+                        # Gangguan pencatatan notifikasi tidak boleh membatalkan
+                        # inspeksi dan hasil evaluasi yang sudah tersimpan.
+                        pass
         return upload_id
     except Exception as exc:
         client.table("trx_thermovisi_upload").update({

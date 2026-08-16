@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Iterable
 
 from supabase import Client, create_client
@@ -94,10 +94,162 @@ def fetch_gi(client: Client, ultg_flc: str) -> list[dict[str, Any]]:
 
 def fetch_bays(client: Client, ultg_flc: str, gi_flc: str) -> list[dict[str, Any]]:
     return retry_read(
-        lambda: client.table("v_dropdown_bay")
-        .select("ultg_flc,gi_flc,bay_flc,bay_name,bay_short_name,bay_function_code,voltage_code")
+        lambda: client.table("v_thermovisi_eligible_bay")
+        .select(
+            "ultg_flc,ultg_name,gi_flc,gi_name,bay_flc,bay_name,bay_short_name,"
+            "bay_function_code,bay_function_name,voltage_code"
+        )
         .eq("ultg_flc", ultg_flc)
         .eq("gi_flc", gi_flc)
+        .order("bay_name")
+        .execute()
+        .data
+    )
+
+
+def fetch_or_create_plan(
+    client: Client,
+    *,
+    period_month: date,
+    ultg_functloc_id: str,
+    work_type: str,
+    stage_code: str,
+    user_id: str,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    period_value = period_month.replace(day=1).isoformat()
+    existing = retry_read(
+        lambda: client.table("trx_thermovisi_plan")
+        .select("plan_id,period_month,ultg_functloc_id,work_type,stage_code,plan_status,created_by")
+        .eq("period_month", period_value)
+        .eq("ultg_functloc_id", ultg_functloc_id)
+        .eq("work_type", work_type)
+        .eq("stage_code", stage_code)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if existing:
+        return existing[0]
+    rows = (
+        client.table("trx_thermovisi_plan")
+        .insert(
+            {
+                "period_month": period_value,
+                "ultg_functloc_id": ultg_functloc_id,
+                "work_type": work_type,
+                "stage_code": stage_code,
+                "plan_status": "ACTIVE",
+                "notes": notes or None,
+                "created_by": user_id,
+            }
+        )
+        .execute()
+        .data
+    )
+    if not rows:
+        raise RuntimeError("Rencana gagal dibuat.")
+    return rows[0]
+
+
+def add_plan_items(
+    client: Client,
+    *,
+    plan_id: str,
+    bay_ids: list[str],
+) -> int:
+    normalized = list(dict.fromkeys(str(value).strip() for value in bay_ids if str(value).strip()))
+    if not normalized:
+        return 0
+    existing = retry_read(
+        lambda: client.table("trx_thermovisi_plan_item")
+        .select("bay_functloc_id")
+        .eq("plan_id", plan_id)
+        .in_("bay_functloc_id", normalized)
+        .execute()
+        .data
+    )
+    existing_ids = {str(row["bay_functloc_id"]) for row in existing}
+    rows = [
+        {
+            "plan_id": plan_id,
+            "bay_functloc_id": bay_id,
+            "item_status": "PLANNED",
+        }
+        for bay_id in normalized
+        if bay_id not in existing_ids
+    ]
+    if rows:
+        client.table("trx_thermovisi_plan_item").insert(rows).execute()
+    return len(rows)
+
+
+def fetch_plan_monitoring(
+    client: Client,
+    *,
+    period_month: date,
+    ultg_flc: str,
+    work_type: str,
+    stage_code: str,
+) -> list[dict[str, Any]]:
+    return retry_read(
+        lambda: client.table("v_thermovisi_plan_monitoring")
+        .select("*")
+        .eq("period_month", period_month.replace(day=1).isoformat())
+        .eq("ultg_flc", ultg_flc)
+        .eq("work_type", work_type)
+        .eq("stage_code", stage_code)
+        .order("gi_name")
+        .order("bay_name")
+        .execute()
+        .data
+    )
+
+
+def fetch_plan_gi_summary(
+    client: Client,
+    *,
+    period_month: date,
+    ultg_flc: str,
+    work_type: str,
+    stage_code: str,
+) -> list[dict[str, Any]]:
+    return retry_read(
+        lambda: client.table("v_thermovisi_plan_gi_summary")
+        .select("*")
+        .eq("period_month", period_month.replace(day=1).isoformat())
+        .eq("ultg_flc", ultg_flc)
+        .eq("work_type", work_type)
+        .eq("stage_code", stage_code)
+        .order("gi_name")
+        .execute()
+        .data
+    )
+
+
+def fetch_outstanding_plan_items(
+    client: Client,
+    *,
+    period_month: date,
+    ultg_flc: str,
+    gi_flc: str,
+    work_type: str,
+    stage_code: str,
+) -> list[dict[str, Any]]:
+    return retry_read(
+        lambda: client.table("v_thermovisi_plan_monitoring")
+        .select(
+            "plan_id,plan_item_id,period_month,work_type,stage_code,plan_status,"
+            "ultg_flc,gi_flc,bay_flc,bay_name,bay_short_name,bay_function_code,"
+            "voltage_code,template_code,execution_status"
+        )
+        .eq("period_month", period_month.replace(day=1).isoformat())
+        .eq("ultg_flc", ultg_flc)
+        .eq("gi_flc", gi_flc)
+        .eq("work_type", work_type)
+        .eq("stage_code", stage_code)
+        .eq("plan_status", "ACTIVE")
+        .in_("execution_status", ["PLANNED", "IN_PROGRESS"])
         .order("bay_name")
         .execute()
         .data
@@ -143,6 +295,7 @@ def save_import(
     executor: str | None,
     notes: str | None,
     user_id: str,
+    plan_item_by_bay: dict[str, str] | None = None,
 ) -> str:
     digest = file_sha256(file_bytes)
     duplicate = duplicate_upload(client, digest)
@@ -159,6 +312,7 @@ def save_import(
         executor=executor,
         notes=notes,
         user_id=user_id,
+        plan_item_by_bay=plan_item_by_bay,
     )
 
     periods = {

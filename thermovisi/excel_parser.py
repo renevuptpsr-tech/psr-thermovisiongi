@@ -37,6 +37,8 @@ class ParsedSheet:
     numeric_count: int
     invalid_count: int
     warning_count: int
+    not_measured_count: int = 0
+    not_applicable_count: int = 0
 
 
 def _normalise(value: Any) -> str:
@@ -127,9 +129,24 @@ def _value_spec(value_map: dict[str, Any], key: str) -> tuple[str | None, int]:
     return None, 0
 
 
-def _quality(number: float | None, required: bool) -> tuple[str, str | None]:
+_NOT_MEASURED_VALUES = {"-", "—", "–", "tidak diukur", "tidak dilakukan pengukuran", "not measured"}
+_NOT_APPLICABLE_VALUES = {"n/a", "na", "tidak ada", "tidak tersedia", "not applicable"}
+
+
+def _quality(raw: Any, number: float | None, required: bool) -> tuple[str, str | None]:
+    raw_text = _normalise(raw)
+    if raw_text in _NOT_MEASURED_VALUES:
+        return "NOT_MEASURED", "Pengukuran tidak dilakukan"
+    if raw_text in _NOT_APPLICABLE_VALUES:
+        return "NOT_APPLICABLE", "Titik ukur tidak tersedia/tidak berlaku"
+    if raw is None or raw_text == "":
+        return (
+            ("INVALID", "Nilai suhu wajib kosong")
+            if required
+            else ("WARNING", "Nilai opsional kosong")
+        )
     if number is None:
-        return ("INVALID", "Nilai suhu wajib tidak ditemukan") if required else ("WARNING", "Nilai opsional kosong")
+        return "INVALID", "Nilai suhu bukan angka yang valid"
     if number < -50 or number > 300:
         return "WARNING", "Nilai suhu di luar rentang operasional wajar (-50 s.d. 300 °C)"
     return "VALID", None
@@ -173,7 +190,7 @@ def parse_workbook(
                 address = f"{column}{row_no + row_offset}" if column and row_no else None
                 raw = ws[address].value if address else None
                 temperature = _number(raw)
-                quality, message = _quality(temperature, bool(item.get("is_required", True)))
+                quality, message = _quality(raw, temperature, bool(item.get("is_required", True)))
                 if row_no is None:
                     quality, message = "INVALID", "Baris titik ukur tidak ditemukan"
                 elif column is None:
@@ -203,7 +220,13 @@ def parse_workbook(
                 )
 
         numeric_count = sum(m.temperature_c is not None for m in measurements)
-        if numeric_count == 0:
+        not_measured_count = sum(
+            m.data_quality_status == "NOT_MEASURED" for m in measurements
+        )
+        not_applicable_count = sum(
+            m.data_quality_status == "NOT_APPLICABLE" for m in measurements
+        )
+        if numeric_count == 0 and not_measured_count == 0 and not_applicable_count == 0:
             warnings.append(
                 f"Sheet '{sheet_name}' dikenali dari label titik ukur tetapi tidak berisi nilai angka; "
                 "sheet dilewati."
@@ -216,6 +239,8 @@ def parse_workbook(
                 numeric_count=numeric_count,
                 invalid_count=sum(m.data_quality_status == "INVALID" for m in measurements),
                 warning_count=sum(m.data_quality_status == "WARNING" for m in measurements),
+                not_measured_count=not_measured_count,
+                not_applicable_count=not_applicable_count,
             )
         )
 

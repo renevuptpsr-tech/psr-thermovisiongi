@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 from typing import Any
+import unicodedata
 
 
 SINGLE_SHEET_MODE = "SINGLE_SHEET"
 TRAFO_TWO_SHEET_MODE = "TRAFO_TWO_SHEET"
+
+
+def _sheet_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.replace("\u00a0", " ")
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _sheet_lookup(valid_sheet_names: Iterable[str]) -> dict[str, str]:
+    """Petakan nama tampilan ke nama workbook asli tanpa kehilangan spasi tersembunyi."""
+    return {_sheet_key(name): str(name) for name in valid_sheet_names}
 
 
 def mapping_mode_from_template(
@@ -34,7 +47,7 @@ def sheet_mapping_from_bays(
 ) -> tuple[dict[str, str], list[str]]:
     """Ubah pilihan Bay -> sheet menjadi mapping sheet -> Bay untuk proses simpan."""
     expected = set(expected_bay_ids)
-    valid_sheets = set(valid_sheet_names)
+    valid_sheets = _sheet_lookup(valid_sheet_names)
     bay_to_sheet: dict[str, str] = {}
     sheet_to_bay: dict[str, str] = {}
     errors: list[str] = []
@@ -42,14 +55,16 @@ def sheet_mapping_from_bays(
     for row in rows:
         bay_id = str(row.get("bay_flc") or "").strip()
         raw_sheet_name = row.get("Sheet Excel")
-        sheet_name = str(raw_sheet_name or "").strip()
-        if sheet_name.casefold() in {"nan", "none", "<na>"}:
+        sheet_name = str(raw_sheet_name or "")
+        if _sheet_key(sheet_name) in {"nan", "none", "<na>"}:
             sheet_name = ""
         if bay_id not in expected or not sheet_name:
             continue
-        if sheet_name not in valid_sheets:
+        actual_sheet_name = valid_sheets.get(_sheet_key(sheet_name))
+        if not actual_sheet_name:
             errors.append(f"Sheet '{sheet_name}' tidak ditemukan di dalam workbook Excel.")
             continue
+        sheet_name = actual_sheet_name
         if bay_id in bay_to_sheet:
             errors.append(f"Bay {bay_id} muncul lebih dari satu kali pada pemetaan.")
             continue
@@ -78,7 +93,7 @@ def trafo_sheet_mapping_from_bays(
 ) -> tuple[dict[str, dict[str, str]], list[str]]:
     """Pemetaan satu Bay Trafo ke dua sheet: TRAFO (A) dan BAY (B)."""
     expected = set(expected_bay_ids)
-    valid_sheets = set(valid_sheet_names)
+    valid_sheets = _sheet_lookup(valid_sheet_names)
     sections = sheet_sections or {}
     assignments: dict[str, dict[str, str]] = {}
     completed_roles: dict[str, set[str]] = {bay_id: set() for bay_id in expected_bay_ids}
@@ -94,14 +109,16 @@ def trafo_sheet_mapping_from_bays(
             continue
         for role, column_name, expected_section in role_specs:
             raw_sheet_name = row.get(column_name)
-            sheet_name = str(raw_sheet_name or "").strip()
-            if sheet_name.casefold() in {"nan", "none", "<na>"}:
+            sheet_name = str(raw_sheet_name or "")
+            if _sheet_key(sheet_name) in {"nan", "none", "<na>"}:
                 sheet_name = ""
             if not sheet_name:
                 continue
-            if sheet_name not in valid_sheets:
+            actual_sheet_name = valid_sheets.get(_sheet_key(sheet_name))
+            if not actual_sheet_name:
                 errors.append(f"Sheet '{sheet_name}' tidak ditemukan di dalam workbook Excel.")
                 continue
+            sheet_name = actual_sheet_name
             if sheet_name in assignments:
                 previous = assignments[sheet_name]
                 errors.append(

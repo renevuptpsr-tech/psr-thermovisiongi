@@ -64,7 +64,25 @@ Role `authenticated` perlu `SELECT` pada tiga view dropdown dan tabel referensi 
 
 ## Google Drive
 
-Aktifkan Google Drive API, buat service account, lalu bagikan folder tujuan kepada `client_email` service account dengan akses Editor. Salin ID folder dan kredensial JSON ke `.streamlit/secrets.toml` mengikuti contoh. File tidak disimpan di Supabase Storage.
+Aktifkan Google Drive API, buat service account, lalu bagikan folder tujuan kepada `client_email` service account dengan akses Editor. Buat key bertipe JSON dan salin seluruh nilai dari file JSON tersebut ke bagian `[google_service_account]` pada `.streamlit/secrets.toml`. Jangan membiarkan nilai contoh/placeholder `...`, terutama pada `private_key`. File tidak disimpan di Supabase Storage.
+
+Folder penyimpanan proyek ini menggunakan ID `1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i`. Isi konfigurasi berikut; aplikasi juga dapat menormalisasi URL folder lengkap menjadi ID tersebut:
+
+```toml
+[google_drive]
+folder_id = "1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i"
+```
+
+`private_key` harus memuat header, isi key, dan footer lengkap:
+
+```toml
+private_key = """-----BEGIN PRIVATE KEY-----
+ISI_KEY_DARI_JSON_TANPA_DIUBAH
+-----END PRIVATE KEY-----
+"""
+```
+
+Jika menulis key dalam satu baris, pemisah baris literal `\\n` dari JSON juga didukung. Jangan mengunggah atau melakukan commit terhadap `.streamlit/secrets.toml` karena file tersebut berisi kredensial rahasia.
 
 ## Catatan validasi
 

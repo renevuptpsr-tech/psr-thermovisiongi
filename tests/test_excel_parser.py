@@ -109,3 +109,49 @@ def test_form_section_is_detected_from_labels_not_sheet_name():
     assert warnings == []
     assert sheets[0].measurements[0].form_section_code == "A"
     assert sheets[0].measurements[0].temperature_c == 45
+
+
+def test_dash_is_not_measured_and_does_not_make_sheet_invalid():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "BAY TIDAK DIUKUR"
+    ws["B15"] = "Titik A"
+    ws["J15"] = "-"
+    ws["K15"] = "—"
+    ws["L15"] = "TIDAK DIUKUR"
+    buffer = BytesIO()
+    wb.save(buffer)
+    items = [{
+        "template_item_id": 1, "form_section_code": "MAIN", "sequence_no": 1,
+        "source_row_no": 15, "source_occurrence_no": 1, "raw_point_label": "Titik A",
+        "equipment_group_code": "PMT", "point_code": "POINT_A",
+        "measurement_mode_code": "PHASE", "phase_codes": ["R", "S", "T"],
+        "source_value_map": {"R": "J", "S": "K", "T": "L"}, "is_required": True,
+    }]
+
+    sheets, warnings = parse_workbook(buffer.getvalue(), items)
+
+    assert warnings == []
+    assert len(sheets) == 1
+    assert sheets[0].numeric_count == 0
+    assert sheets[0].invalid_count == 0
+    assert sheets[0].not_measured_count == 3
+    assert {m.data_quality_status for m in sheets[0].measurements} == {"NOT_MEASURED"}
+
+
+def test_blank_required_cell_remains_invalid():
+    wb = Workbook()
+    ws = wb.active
+    ws["B15"] = "Titik A"
+    buffer = BytesIO()
+    wb.save(buffer)
+    items = [{
+        "template_item_id": 1, "form_section_code": "MAIN", "sequence_no": 1,
+        "source_row_no": 15, "source_occurrence_no": 1, "raw_point_label": "Titik A",
+        "equipment_group_code": "PMT", "point_code": "POINT_A",
+        "measurement_mode_code": "SINGLE", "phase_codes": [],
+        "source_value_map": {"VALUE": "E"}, "is_required": True,
+    }]
+    sheets, warnings = parse_workbook(buffer.getvalue(), items)
+    assert sheets == []
+    assert any("tidak berisi nilai angka" in warning for warning in warnings)

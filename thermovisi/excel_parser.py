@@ -7,7 +7,6 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
 
 @dataclass(slots=True)
@@ -76,6 +75,47 @@ def _row_for_label(ws, label: str, occurrence: int) -> int | None:
     return None
 
 
+def _sheet_label_rows(ws) -> dict[str, list[int]]:
+    """Indeks label sisi kiri sheet; nama sheet sengaja tidak digunakan."""
+    rows_by_label: dict[str, list[int]] = {}
+    for row in ws.iter_rows(min_col=1, max_col=min(ws.max_column, 9)):
+        for cell in row:
+            label = _normalise(cell.value)
+            if label:
+                rows_by_label.setdefault(label, []).append(cell.row)
+    return rows_by_label
+
+
+def _items_for_sheet(
+    ws,
+    template_items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, list[int]], str | None]:
+    """Pilih bagian template dari label isi sheet, bukan dari nama sheet."""
+    label_rows = _sheet_label_rows(ws)
+    items_by_section: dict[str, list[dict[str, Any]]] = {}
+    for item in template_items:
+        section = str(item.get("form_section_code") or "MAIN")
+        items_by_section.setdefault(section, []).append(item)
+
+    scores = {
+        section: sum(
+            1
+            for item in items
+            if _normalise(item.get("raw_point_label")) in label_rows
+        )
+        for section, items in items_by_section.items()
+    }
+    best_score = max(scores.values(), default=0)
+    if best_score == 0:
+        return [], label_rows, None
+    winners = [section for section, score in scores.items() if score == best_score]
+    if len(winners) > 1:
+        return [], label_rows, (
+            "Isi sheet cocok sama kuat dengan beberapa bagian template: " + ", ".join(winners)
+        )
+    return items_by_section[winners[0]], label_rows, None
+
+
 def _value_spec(value_map: dict[str, Any], key: str) -> tuple[str | None, int]:
     """Mendukung map sederhana {R: J} maupun {R: {column: J, row_offset: 0}}."""
     spec = value_map.get(key)
@@ -104,29 +144,26 @@ def parse_workbook(
         raise ValueError("Template tidak mempunyai item aktif.")
 
     workbook = load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=False)
-    sheet_patterns: list[str] = []
-    for item in template_items:
-        pattern = item["source_sheet_pattern"]
-        if pattern not in sheet_patterns:
-            sheet_patterns.append(pattern)
-
-    matched = [name for name in workbook.sheetnames if any(re.search(p, name, re.I) for p in sheet_patterns)]
     warnings: list[str] = []
     result: list[ParsedSheet] = []
 
-    for sheet_name in matched:
+    for sheet_name in workbook.sheetnames:
         ws = workbook[sheet_name]
+        selected_items, label_rows, selection_warning = _items_for_sheet(ws, template_items)
+        if selection_warning:
+            warnings.append(f"Sheet '{sheet_name}' dilewati: {selection_warning}.")
+            continue
+        if not selected_items:
+            continue
         measurements: list[ParsedMeasurement] = []
-        for item in template_items:
-            if not re.search(item["source_sheet_pattern"], sheet_name, re.I):
-                continue
-            row_no = item.get("source_row_no")
+        for item in selected_items:
+            label = _normalise(item.get("raw_point_label"))
+            occurrence = int(item.get("source_occurrence_no") or 1)
+            matching_rows = label_rows.get(label, [])
+            row_no = matching_rows[occurrence - 1] if len(matching_rows) >= occurrence else None
+            # Fallback hanya setelah bagian form dikenali dari isi sheet.
             if row_no is None:
-                row_no = _row_for_label(
-                    ws,
-                    item.get("raw_point_label", ""),
-                    int(item.get("source_occurrence_no") or 1),
-                )
+                row_no = item.get("source_row_no")
 
             mode = item["measurement_mode_code"]
             keys = list(item.get("phase_codes") or []) if mode == "PHASE" else ["VALUE"]
@@ -167,7 +204,10 @@ def parse_workbook(
 
         numeric_count = sum(m.temperature_c is not None for m in measurements)
         if numeric_count == 0:
-            warnings.append(f"Sheet '{sheet_name}' cocok dengan pola template tetapi kosong; sheet dilewati.")
+            warnings.append(
+                f"Sheet '{sheet_name}' dikenali dari label titik ukur tetapi tidak berisi nilai angka; "
+                "sheet dilewati."
+            )
             continue
         result.append(
             ParsedSheet(
@@ -179,8 +219,11 @@ def parse_workbook(
             )
         )
 
-    if not matched:
-        warnings.append("Tidak ada nama sheet yang cocok dengan pola template.")
+    if not result:
+        warnings.append(
+            "Tidak ada sheet yang isi titik ukurnya cocok dengan template yang dipilih. "
+            "Nama sheet tidak digunakan sebagai syarat."
+        )
     return result, warnings
 
 

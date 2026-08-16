@@ -35,9 +35,9 @@ def build_inspection_row(
     current_a = float(metadata["measurement_current_a"])
     peak_a = float(metadata["monthly_peak_current_a"])
     ambient_c = float(metadata["ambient_temperature_c"])
-    if current_a <= 0 or peak_a <= 0:
-        raise ValueError(f"Beban Bay {target_functloc_id} harus lebih besar dari 0 A.")
-    if peak_a < current_a:
+    if current_a < 0 or peak_a < 0:
+        raise ValueError(f"Beban Bay {target_functloc_id} tidak boleh negatif.")
+    if current_a > 0 and peak_a < current_a:
         raise ValueError(
             f"Beban tertinggi Bay {target_functloc_id} tidak boleh lebih kecil dari beban pengukuran."
         )

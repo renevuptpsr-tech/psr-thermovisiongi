@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import os
-import re
 from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from thermovisi.excel_parser import parse_workbook, preview_rows
+from thermovisi.excel_parser import parse_workbook
+from thermovisi.mapping import trafo_sheet_mapping_from_bays
+from thermovisi.review import build_sheet_review, compact_review_rows, style_compact_review
 from thermovisi.supabase_service import (
     fetch_bays,
     fetch_gi,
@@ -42,6 +43,9 @@ def secret(name: str, default: str = "") -> str:
 
 
 def authenticated_client():
+    cached_client = st.session_state.get("supabase_client")
+    if cached_client is not None:
+        return cached_client
     auth = st.session_state.get("auth") or {}
     client = make_client(
         secret("SUPABASE_URL"),
@@ -54,16 +58,27 @@ def authenticated_client():
         st.session_state.auth.update(
             {"access_token": session.access_token, "refresh_token": session.refresh_token}
         )
+    st.session_state.supabase_client = client
     return client
+
+
+def stop_for_reference_error(error: Exception) -> None:
+    st.error(f"Koneksi ke Supabase terputus saat membaca referensi: {error}")
+    st.caption(
+        "Proyek Supabase terdeteksi aktif. Gangguan ini biasanya bersifat sementara atau berasal dari jaringan/proxy lokal."
+    )
+    if st.button("Coba baca ulang", type="primary"):
+        st.session_state.supabase_client = None
+        st.session_state.reference_cache = {
+            "gi": {}, "bays": {}, "template_items": {}
+        }
+        st.rerun()
+    st.stop()
 
 
 def bay_label(row: dict[str, Any]) -> str:
     short_name = (row.get("bay_short_name") or row.get("bay_name") or "Bay").strip()
     return f"{short_name} — {row['bay_flc']}"
-
-
-def normalise_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.casefold())
 
 
 def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]], list[str]]:
@@ -76,7 +91,7 @@ def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]]
             "Tanggal pelaksanaan",
             "Pukul pelaksanaan",
             "Beban pengukuran (A)",
-            "Beban tertinggi bulan (A)",
+            "Beban tertinggi pernah dicapai (A)",
             "Suhu lingkungan (°C)",
         ]
         if any(pd.isna(row[field]) for field in required):
@@ -84,14 +99,14 @@ def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]]
             continue
         try:
             current_a = float(row["Beban pengukuran (A)"])
-            peak_a = float(row["Beban tertinggi bulan (A)"])
+            peak_a = float(row["Beban tertinggi pernah dicapai (A)"])
             ambient_c = float(row["Suhu lingkungan (°C)"])
         except (TypeError, ValueError):
             errors.append(f"Beban atau suhu {name} bukan angka yang valid.")
             continue
-        if current_a <= 0 or peak_a <= 0:
-            errors.append(f"Beban {name} harus lebih besar dari 0 A.")
-        if peak_a < current_a:
+        if current_a < 0 or peak_a < 0:
+            errors.append(f"Beban {name} tidak boleh negatif.")
+        if current_a > 0 and peak_a < current_a:
             errors.append(f"Beban tertinggi {name} lebih kecil dari beban pengukuran.")
         if not -50 <= ambient_c <= 100:
             errors.append(f"Suhu lingkungan {name} harus berada pada -50 sampai 100 °C.")
@@ -105,21 +120,10 @@ def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]]
     return result, errors
 
 
-def suggested_bay_label(sheet_name: str, selected_rows: list[dict[str, Any]]) -> str | None:
-    if len(selected_rows) == 1:
-        return bay_label(selected_rows[0])
-    sheet_key = normalise_key(sheet_name)
-    for row in selected_rows:
-        candidates = [row["bay_flc"], row.get("bay_short_name") or "", row.get("bay_name") or ""]
-        for candidate in candidates:
-            candidate_key = normalise_key(candidate)
-            if candidate_key and (candidate_key in sheet_key or sheet_key in candidate_key):
-                return bay_label(row)
-    return None
-
-
 for key, value in {
     "auth": None,
+    "supabase_client": None,
+    "reference_cache": {"gi": {}, "bays": {}, "template_items": {}},
     "parsed": None,
     "parse_warnings": [],
     "parse_signature": None,
@@ -137,7 +141,9 @@ with st.sidebar:
     if st.session_state.auth:
         st.caption("Pengguna aktif")
         st.write(st.session_state.auth["email"])
-        if st.button("Keluar", use_container_width=True):
+        if st.button("Keluar", width="stretch"):
+            st.session_state.supabase_client = None
+            st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
             st.session_state.auth = None
             st.session_state.parsed = None
             st.rerun()
@@ -146,12 +152,13 @@ with st.sidebar:
         with st.form("login"):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Masuk", use_container_width=True, type="primary")
+            submitted = st.form_submit_button("Masuk", width="stretch", type="primary")
         if submitted:
             try:
-                st.session_state.auth = sign_in(
-                    make_client(secret("SUPABASE_URL"), secret("SUPABASE_KEY")), email, password
-                )
+                login_client = make_client(secret("SUPABASE_URL"), secret("SUPABASE_KEY"))
+                st.session_state.auth = sign_in(login_client, email, password)
+                st.session_state.supabase_client = login_client
+                st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
                 st.rerun()
             except Exception:
                 st.error("Login gagal. Periksa email dan password.")
@@ -160,13 +167,29 @@ if not st.session_state.auth:
     st.info("Silakan masuk menggunakan akun Supabase untuk memulai inspeksi.")
     st.stop()
 
-client = authenticated_client()
 try:
-    ultg_rows = fetch_ultg(client)
-    templates = fetch_templates(client)
+    client = authenticated_client()
 except Exception as exc:
-    st.error(f"Tidak dapat membaca referensi Supabase: {exc}")
+    st.error(f"Sesi Supabase tidak dapat dipulihkan: {exc}")
+    if st.button("Masuk ulang", type="primary"):
+        st.session_state.auth = None
+        st.session_state.supabase_client = None
+        st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
+        st.rerun()
     st.stop()
+reference_cache = st.session_state.reference_cache
+reference_cache.setdefault("gi", {})
+reference_cache.setdefault("bays", {})
+reference_cache.setdefault("template_items", {})
+try:
+    if "ultg" not in reference_cache:
+        reference_cache["ultg"] = fetch_ultg(client)
+    if "templates" not in reference_cache:
+        reference_cache["templates"] = fetch_templates(client)
+    ultg_rows = reference_cache["ultg"]
+    templates = reference_cache["templates"]
+except Exception as exc:
+    stop_for_reference_error(exc)
 
 with st.container(border=True):
     st.markdown("### 1 · Pilih lokasi dan Bay")
@@ -180,7 +203,14 @@ with st.container(border=True):
         )
     ultg_flc = ultg_options.get(ultg_choice)
 
-    gi_rows = fetch_gi(client, ultg_flc) if ultg_flc else []
+    gi_rows = []
+    if ultg_flc:
+        try:
+            if ultg_flc not in reference_cache["gi"]:
+                reference_cache["gi"][ultg_flc] = fetch_gi(client, ultg_flc)
+            gi_rows = reference_cache["gi"][ultg_flc]
+        except Exception as exc:
+            stop_for_reference_error(exc)
     gi_options = {f"{row['gi_name']} — {row['gi_flc']}": row["gi_flc"] for row in gi_rows}
     with location_2:
         gi_choice = st.selectbox(
@@ -193,7 +223,15 @@ with st.container(border=True):
         )
     gi_flc = gi_options.get(gi_choice)
 
-    bay_rows = fetch_bays(client, ultg_flc, gi_flc) if ultg_flc and gi_flc else []
+    bay_rows = []
+    if ultg_flc and gi_flc:
+        bay_cache_key = f"{ultg_flc}|{gi_flc}"
+        try:
+            if bay_cache_key not in reference_cache["bays"]:
+                reference_cache["bays"][bay_cache_key] = fetch_bays(client, ultg_flc, gi_flc)
+            bay_rows = reference_cache["bays"][bay_cache_key]
+        except Exception as exc:
+            stop_for_reference_error(exc)
     with location_3:
         st.metric("Bay tersedia", len(bay_rows))
 
@@ -229,7 +267,7 @@ with st.container(border=True):
                 "Tanggal pelaksanaan": date.today(),
                 "Pukul pelaksanaan": now.time(),
                 "Beban pengukuran (A)": 1.0,
-                "Beban tertinggi bulan (A)": 1.0,
+                "Beban tertinggi pernah dicapai (A)": 1.0,
                 "Suhu lingkungan (°C)": 30.0,
             }
             for row in selected_bay_rows
@@ -238,7 +276,7 @@ with st.container(border=True):
     metadata_editor = st.data_editor(
         metadata_seed,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         num_rows="fixed",
         disabled=["bay_flc", "Bay"],
         column_config={
@@ -247,10 +285,10 @@ with st.container(border=True):
             "Tanggal pelaksanaan": st.column_config.DateColumn("Tanggal pelaksanaan", format="DD/MM/YYYY"),
             "Pukul pelaksanaan": st.column_config.TimeColumn("Pukul", format="HH:mm"),
             "Beban pengukuran (A)": st.column_config.NumberColumn(
-                "Beban ukur (A)", min_value=0.01, step=1.0, format="%.2f"
+                "Beban ukur (A)", min_value=0.0, step=1.0, format="%.2f"
             ),
-            "Beban tertinggi bulan (A)": st.column_config.NumberColumn(
-                "Beban tertinggi (A)", min_value=0.01, step=1.0, format="%.2f"
+            "Beban tertinggi pernah dicapai (A)": st.column_config.NumberColumn(
+                "Beban tertinggi pernah dicapai (A)", min_value=0.0, step=1.0, format="%.2f"
             ),
             "Suhu lingkungan (°C)": st.column_config.NumberColumn(
                 "Suhu lingkungan (°C)", min_value=-50.0, max_value=100.0, step=0.1, format="%.1f"
@@ -319,7 +357,9 @@ with st.container(border=True):
     parse_disabled = not (uploaded and template_code and not metadata_errors)
     if st.button("Baca dan validasi Excel", type="primary", disabled=parse_disabled):
         try:
-            items = fetch_template_items(client, template_code)
+            if template_code not in reference_cache["template_items"]:
+                reference_cache["template_items"][template_code] = fetch_template_items(client, template_code)
+            items = reference_cache["template_items"][template_code]
             parsed, warnings = parse_workbook(uploaded.getvalue(), items)
             st.session_state.parsed = parsed
             st.session_state.parse_warnings = warnings
@@ -338,82 +378,198 @@ if not parsed:
     st.stop()
 
 with st.container(border=True):
-    st.markdown("### 4 · Petakan sheet ke Bay")
-    st.caption("Setiap sheet hanya dapat diarahkan ke Bay yang telah dipilih pada langkah pertama.")
+    st.markdown("### 4 · Pasangkan dua sheet untuk setiap Bay Trafo")
+    st.caption(
+        "Setiap Bay Trafo mempunyai Sheet Trafo dan Sheet Bay. Nama sheet bebas; "
+        "aplikasi memvalidasi bagian form berdasarkan isi titik ukurnya."
+    )
+    sheet_names = [parsed_sheet.sheet_name for parsed_sheet in parsed]
+    sheet_sections = {
+        parsed_sheet.sheet_name: {
+            measurement.form_section_code for measurement in parsed_sheet.measurements
+        }
+        for parsed_sheet in parsed
+    }
     mapping_seed = pd.DataFrame(
         [
             {
-                "Sheet Excel": parsed_sheet.sheet_name,
-                "Jumlah nilai": parsed_sheet.numeric_count,
-                "Bay tujuan": suggested_bay_label(parsed_sheet.sheet_name, selected_bay_rows),
+                "bay_flc": row["bay_flc"],
+                "Bay": bay_label(row),
+                "Sheet Trafo": None,
+                "Sheet Bay": None,
             }
-            for parsed_sheet in parsed
+            for row in selected_bay_rows
         ]
     )
     mapping_editor = st.data_editor(
         mapping_seed,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         num_rows="fixed",
-        disabled=["Sheet Excel", "Jumlah nilai"],
+        disabled=["bay_flc", "Bay"],
         column_config={
-            "Sheet Excel": st.column_config.TextColumn("Sheet Excel", width="large"),
-            "Jumlah nilai": st.column_config.NumberColumn("Jumlah nilai", width="small"),
-            "Bay tujuan": st.column_config.SelectboxColumn(
-                "Bay tujuan", options=selected_labels, width="large"
+            "bay_flc": None,
+            "Bay": st.column_config.TextColumn("Bay tujuan", width="large"),
+            "Sheet Trafo": st.column_config.SelectboxColumn(
+                "Sheet Trafo", options=sheet_names, width="large", required=True
+            ),
+            "Sheet Bay": st.column_config.SelectboxColumn(
+                "Sheet Bay", options=sheet_names, width="large", required=True
             ),
         },
-        key=f"mapping_editor_{digest}_{'_'.join(selected_bay_ids)}",
+        key=f"bay_sheet_mapping_{digest}_{'_'.join(selected_bay_ids)}",
     )
-    label_to_bay = {bay_label(row): row["bay_flc"] for row in selected_bay_rows}
-    sheet_to_bay: dict[str, str] = {}
-    for _, row in mapping_editor.iterrows():
-        destination = row["Bay tujuan"]
-        if isinstance(destination, str) and destination in label_to_bay:
-            sheet_to_bay[str(row["Sheet Excel"])] = label_to_bay[destination]
-    mapping_complete = len(sheet_to_bay) == len(parsed)
-    if not mapping_complete:
-        st.warning("Pilih Bay tujuan untuk seluruh sheet sebelum menyimpan.")
+    sheet_assignments, mapping_errors = trafo_sheet_mapping_from_bays(
+        mapping_editor.to_dict("records"),
+        expected_bay_ids=selected_bay_ids,
+        valid_sheet_names=sheet_names,
+        sheet_sections=sheet_sections,
+    )
+    for message in mapping_errors:
+        st.warning(message)
+    mapping_complete = not mapping_errors
 
-ambient_by_sheet = {
-    sheet_name: float(metadata_by_bay[bay_id]["ambient_temperature_c"])
-    for sheet_name, bay_id in sheet_to_bay.items()
-    if bay_id in metadata_by_bay
-}
-rows = preview_rows(parsed, ambient_by_sheet)
-total_invalid = sum(row["data_quality_status"] == "INVALID" for row in rows)
-total_warning = sum(row["data_quality_status"] == "WARNING" for row in rows)
-numeric_count = sum(row["temperature_c"] is not None for row in rows)
+    parsed_by_name = {item.sheet_name: item for item in parsed}
+    sheet_to_bay = {
+        sheet_name: assignment["bay_flc"]
+        for sheet_name, assignment in sheet_assignments.items()
+    }
+    assignments_by_bay: dict[str, dict[str, str]] = {}
+    for sheet_name, assignment in sheet_assignments.items():
+        assignments_by_bay.setdefault(assignment["bay_flc"], {})[
+            assignment["sheet_role"]
+        ] = sheet_name
+    mapped_parsed = [parsed_by_name[name] for name in sheet_to_bay if name in parsed_by_name]
+    if mapping_complete:
+        confirmation_rows = [
+            {
+                "Bay": bay_label(row),
+                "Sheet Trafo": assignments_by_bay[row["bay_flc"]]["TRAFO"],
+                "Nilai Trafo": parsed_by_name[
+                    assignments_by_bay[row["bay_flc"]]["TRAFO"]
+                ].numeric_count,
+                "Sheet Bay": assignments_by_bay[row["bay_flc"]]["BAY"],
+                "Nilai Bay": parsed_by_name[
+                    assignments_by_bay[row["bay_flc"]]["BAY"]
+                ].numeric_count,
+            }
+            for row in selected_bay_rows
+        ]
+        st.success("Pemetaan dua sheet lengkap. Periksa kembali pasangan Bay sebelum review.")
+        st.dataframe(pd.DataFrame(confirmation_rows), hide_index=True, width="stretch")
+
+    ignored_sheets = [name for name in sheet_names if name not in sheet_to_bay]
+    if ignored_sheets:
+        st.info(f"Sheet yang tidak dipilih tidak akan diimpor: {', '.join(ignored_sheets)}")
+
+total_invalid = sum(sheet.invalid_count for sheet in mapped_parsed)
 
 with st.container(border=True):
-    st.markdown("### 5 · Review dan simpan")
-    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
-    metric_1.metric("Bay dipilih", len(selected_bay_rows))
-    metric_2.metric("Nilai suhu", numeric_count)
-    metric_3.metric("Warning", total_warning)
-    metric_4.metric("Invalid", total_invalid)
+    st.markdown("### 5 · Review hasil dan analisa")
+    st.caption(
+        "Pilih satu Bay. Sheet Trafo dan Sheet Bay ditampilkan pada tab terpisah dengan "
+        "kolom pengukuran yang sudah diringkas."
+    )
 
-    preview_df = pd.DataFrame(rows).rename(
-        columns={
-            "sheet_name": "Sheet",
-            "equipment_group_code": "Peralatan",
-            "point_label": "Titik ukur",
-            "phase_code": "Fasa",
-            "temperature_c": "Suhu °C",
-            "delta_ambient_c": "ΔT ambient °C",
-            "source_cell_address": "Sel",
-            "data_quality_status": "Status",
-            "validation_message": "Pesan",
-        }
+    selected_bay_by_id = {row["bay_flc"]: row for row in selected_bay_rows}
+    review_options = {
+        bay_label(selected_bay_by_id[bay_id]): bay_id
+        for bay_id in assignments_by_bay
+        if bay_id in selected_bay_by_id and {"TRAFO", "BAY"}.issubset(assignments_by_bay[bay_id])
+    }
+    review_choice = st.selectbox(
+        "Bay yang direview",
+        list(review_options),
+        index=0 if review_options else None,
+        placeholder="Pilih Bay",
+        disabled=not review_options,
     )
-    st.dataframe(
-        preview_df[
-            ["Sheet", "Peralatan", "Titik ukur", "Fasa", "Suhu °C", "ΔT ambient °C", "Sel", "Status", "Pesan"]
-        ],
-        use_container_width=True,
-        height=420,
-        hide_index=True,
+
+    all_review_rows: list[dict[str, Any]] = []
+    if review_choice:
+        review_bay_id = review_options[review_choice]
+        review_metadata = metadata_by_bay[review_bay_id]
+        template_items = reference_cache["template_items"][template_code]
+
+        info_1, info_2, info_3 = st.columns(3)
+        info_1.metric("Beban ukur", f"{review_metadata['measurement_current_a']:.2f} A")
+        info_2.metric("Beban tertinggi", f"{review_metadata['monthly_peak_current_a']:.2f} A")
+        info_3.metric("Suhu lingkungan", f"{review_metadata['ambient_temperature_c']:.1f} °C")
+
+        tabs = st.tabs(["Trafo Utama", "Bay Trafo"])
+        role_config = (
+            (tabs[0], "TRAFO", "Sheet Trafo"),
+            (tabs[1], "BAY", "Sheet Bay"),
+        )
+        for tab, role, role_label in role_config:
+            with tab:
+                review_sheet_name = assignments_by_bay[review_bay_id][role]
+                review_sheet = parsed_by_name[review_sheet_name]
+                review_rows = build_sheet_review(
+                    review_sheet,
+                    template_items,
+                    measurement_current_a=float(review_metadata["measurement_current_a"]),
+                    monthly_peak_current_a=float(review_metadata["monthly_peak_current_a"]),
+                    ambient_temperature_c=float(review_metadata["ambient_temperature_c"]),
+                )
+                all_review_rows.extend(review_rows)
+                st.caption(
+                    f"{role_label}: {review_sheet_name} · "
+                    f"{review_sheet.numeric_count} nilai suhu terbaca"
+                )
+                review_df = pd.DataFrame(compact_review_rows(review_rows))
+                st.dataframe(
+                    style_compact_review(review_df),
+                    width="stretch",
+                    height=560,
+                    hide_index=True,
+                    column_config={
+                        "No.": st.column_config.NumberColumn("No.", width="small", format="%d"),
+                        "Peralatan": st.column_config.TextColumn("Peralatan", width="medium"),
+                        "Titik yang diperiksa": st.column_config.TextColumn(
+                            "Titik yang diperiksa", width="large"
+                        ),
+                        "Pengukuran": st.column_config.TextColumn(
+                            "Pengukuran", width="medium"
+                        ),
+                        "Delta T": st.column_config.TextColumn(
+                            "Delta T", width="large"
+                        ),
+                        "Kondisi": st.column_config.TextColumn("Kondisi", width="medium"),
+                        "Kesimpulan / Rekomendasi": st.column_config.TextColumn(
+                            "Kesimpulan / Rekomendasi", width="large"
+                        ),
+                        "Status Data": st.column_config.TextColumn(
+                            "Status Data", width="small"
+                        ),
+                    },
+                )
+                with st.expander("Lihat detail teknis lengkap"):
+                    st.dataframe(
+                        pd.DataFrame(review_rows),
+                        width="stretch",
+                        height=420,
+                        hide_index=True,
+                    )
+
+        abnormal_count = sum(
+            int(row.get("Tingkat perhatian") or 0) > 0 for row in all_review_rows
+        )
+        invalid_review = sum(row["Status data"] == "INVALID" for row in all_review_rows)
+        summary_1, summary_2, summary_3 = st.columns(3)
+        summary_1.metric("Total baris review", len(all_review_rows))
+        summary_2.metric("Perlu perhatian", abnormal_count)
+        summary_3.metric("Data invalid", invalid_review)
+
+    st.divider()
+    st.markdown("#### Validasi sebelum penyimpanan")
+    review_confirmed = st.checkbox(
+        "Saya telah memeriksa seluruh pasangan Bay–Sheet, hasil pengukuran, dan analisa.",
+        value=False,
+        disabled=not mapping_complete or total_invalid > 0,
     )
+    if not review_confirmed:
+        st.info("Penyimpanan masih dikunci. Selesaikan review seluruh sheet terlebih dahulu.")
 
     detail_1, detail_2 = st.columns(2)
     with detail_1:
@@ -429,15 +585,25 @@ with st.container(border=True):
     if not service_account or not drive_folder_id:
         st.warning("Konfigurasi Google Drive belum lengkap pada secrets.toml.")
 
+    two_sheet_storage_ready = False
+    st.warning(
+        "Penyimpanan sementara dikunci. Satu inspeksi Bay Trafo sekarang mempunyai dua sheet, "
+        "sedangkan struktur transaksi saat ini masih menyimpan satu source_sheet_name per inspeksi. "
+        "Review dan analisa tetap dapat digunakan."
+    )
+
     ready = (
+        two_sheet_storage_ready
+        and
         mapping_complete
+        and review_confirmed
         and not metadata_errors
         and total_invalid == 0
         and bool(service_account)
         and bool(drive_folder_id)
         and bool(template_meta)
     )
-    if st.button("Simpan inspeksi Thermovisi", type="primary", disabled=not ready, use_container_width=True):
+    if st.button("Simpan inspeksi Thermovisi", type="primary", disabled=not ready, width="stretch"):
         with st.spinner("Mengunggah file dan menyimpan hasil inspeksi..."):
             try:
                 upload_id = save_import(
@@ -449,7 +615,7 @@ with st.container(border=True):
                     folder_id=drive_folder_id,
                     service_account_info=service_account,
                     template_code=template_code,
-                    parsed_sheets=parsed,
+                    parsed_sheets=mapped_parsed,
                     sheet_to_bay=sheet_to_bay,
                     metadata_by_bay=metadata_by_bay,
                     executor=executor,

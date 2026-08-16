@@ -10,12 +10,19 @@ from supabase import Client, create_client
 from .excel_parser import ParsedSheet
 from .google_drive import upload_excel
 from .inspection import build_inspection_row
+from .retry import retry_read
 
 
 def make_client(url: str, publishable_key: str, access_token: str | None = None, refresh_token: str | None = None) -> Client:
     client = create_client(url, publishable_key)
     if access_token and refresh_token:
-        client.auth.set_session(access_token, refresh_token)
+        # set_session memanggil Auth /user. Pada jaringan Windows/proxy yang
+        # tidak stabil, panggilan baca ini aman untuk dicoba ulang.
+        retry_read(
+            lambda: client.auth.set_session(access_token, refresh_token),
+            attempts=3,
+            initial_delay_seconds=0.75,
+        )
     return client
 
 
@@ -30,13 +37,15 @@ def sign_in(client: Client, email: str, password: str) -> dict[str, Any]:
 
 
 def fetch_templates(client: Client) -> list[dict[str, Any]]:
-    return (
-        client.table("ref_thermovisi_template")
-        .select("template_code,template_name,function_code,voltage_code,is_default,description")
-        .eq("is_active", True)
-        .order("template_name")
-        .execute()
-        .data
+    return retry_read(
+        lambda: (
+            client.table("ref_thermovisi_template")
+            .select("template_code,template_name,function_code,voltage_code,is_default,description")
+            .eq("is_active", True)
+            .order("template_name")
+            .execute()
+            .data
+        )
     )
 
 
@@ -44,36 +53,54 @@ def fetch_template_items(client: Client, template_code: str) -> list[dict[str, A
     fields = (
         "template_item_id,form_section_code,sequence_no,source_sheet_pattern,source_row_no,"
         "source_occurrence_no,raw_equipment_label,raw_point_label,equipment_group_code,point_code,"
-        "measurement_mode_code,phase_codes,source_value_map,is_required"
+        "measurement_mode_code,phase_codes,source_value_map,section_code,terminal_side_code,"
+        "position_code,instance_no,winding_code,terminal_voltage_kv,comparison_group_code,"
+        "comparison_role,is_required"
     )
-    return (
-        client.table("ref_thermovisi_template_item")
-        .select(fields)
-        .eq("template_code", template_code)
-        .eq("is_active", True)
-        .order("form_section_code")
-        .order("sequence_no")
+    return retry_read(
+        lambda: (
+            client.table("ref_thermovisi_template_item")
+            .select(fields)
+            .eq("template_code", template_code)
+            .eq("is_active", True)
+            .order("form_section_code")
+            .order("sequence_no")
+            .execute()
+            .data
+        )
+    )
+
+
+def fetch_ultg(client: Client) -> list[dict[str, Any]]:
+    return retry_read(
+        lambda: client.table("v_dropdown_ultg")
+        .select("ultg_flc,ultg_name")
+        .order("ultg_name")
         .execute()
         .data
     )
 
 
-def fetch_ultg(client: Client) -> list[dict[str, Any]]:
-    return client.table("v_dropdown_ultg").select("ultg_flc,ultg_name").order("ultg_name").execute().data
-
-
 def fetch_gi(client: Client, ultg_flc: str) -> list[dict[str, Any]]:
-    return (
-        client.table("v_dropdown_gi").select("ultg_flc,gi_flc,gi_name")
-        .eq("ultg_flc", ultg_flc).order("gi_name").execute().data
+    return retry_read(
+        lambda: client.table("v_dropdown_gi")
+        .select("ultg_flc,gi_flc,gi_name")
+        .eq("ultg_flc", ultg_flc)
+        .order("gi_name")
+        .execute()
+        .data
     )
 
 
 def fetch_bays(client: Client, ultg_flc: str, gi_flc: str) -> list[dict[str, Any]]:
-    return (
-        client.table("v_dropdown_bay")
+    return retry_read(
+        lambda: client.table("v_dropdown_bay")
         .select("ultg_flc,gi_flc,bay_flc,bay_name,bay_short_name,bay_function_code,voltage_code")
-        .eq("ultg_flc", ultg_flc).eq("gi_flc", gi_flc).order("bay_name").execute().data
+        .eq("ultg_flc", ultg_flc)
+        .eq("gi_flc", gi_flc)
+        .order("bay_name")
+        .execute()
+        .data
     )
 
 
@@ -82,7 +109,14 @@ def file_sha256(file_bytes: bytes) -> str:
 
 
 def duplicate_upload(client: Client, file_hash: str) -> dict[str, Any] | None:
-    rows = client.table("trx_thermovisi_upload").select("upload_id,original_filename,processing_status,created_at").eq("file_hash", file_hash).limit(1).execute().data
+    rows = retry_read(
+        lambda: client.table("trx_thermovisi_upload")
+        .select("upload_id,original_filename,processing_status,created_at")
+        .eq("file_hash", file_hash)
+        .limit(1)
+        .execute()
+        .data
+    )
     return rows[0] if rows else None
 
 

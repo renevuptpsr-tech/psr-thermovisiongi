@@ -27,7 +27,7 @@ def test_all_current_rule_families_are_registered():
     assert {
         "TRAFO_BUSHING", "TRAFO_CLAMP", "TRAFO_GRADIENT",
         "PMT_CLAMP", "PMT_INTERRUPTER", "PMT_GRADING_CAPACITOR",
-        "PMS_BLADE", "PMS_MAIN_TERMINAL", "CVT_PT_COMPONENT",
+        "PMT_INSULATOR", "PMS_BLADE", "PMS_MAIN_TERMINAL", "PMS_INSULATOR", "CVT_PT_COMPONENT",
         "CT_CLAMP", "CT_INSULATOR_HOUSING", "LA_NORMALIZED",
     } <= codes
 

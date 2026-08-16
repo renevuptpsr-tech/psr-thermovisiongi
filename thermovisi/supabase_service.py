@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Iterable
@@ -161,7 +162,11 @@ def file_sha256(file_bytes: bytes) -> str:
 def duplicate_upload(client: Client, file_hash: str) -> dict[str, Any] | None:
     rows = retry_read(
         lambda: client.table("trx_thermovisi_upload")
-        .select("upload_id,original_filename,processing_status,created_at")
+        .select(
+            "upload_id,original_filename,processing_status,template_type,total_sheets,"
+            "processed_sheets,total_measurements,drive_file_id,drive_folder_id,"
+            "drive_web_view_link,created_at"
+        )
         .eq("file_hash", file_hash)
         .limit(1)
         .execute()
@@ -170,7 +175,140 @@ def duplicate_upload(client: Client, file_hash: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def _sheet_key(value: Any) -> str:
+    return unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
+
+
+def _existing_import_details(
+    client: Client,
+    upload_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    inspections = retry_read(
+        lambda: client.table("trx_thermovisi_inspection")
+        .select(
+            "inspection_id,target_functloc_id,measurement_date,work_type,stage_code,"
+            "source_sheet_name"
+        )
+        .eq("upload_id", upload_id)
+        .execute()
+        .data
+    )
+    inspection_ids = [row["inspection_id"] for row in inspections]
+    if not inspection_ids:
+        return inspections, []
+
+    sheets: list[dict[str, Any]] = []
+    for id_batch in _value_chunks(inspection_ids):
+        sheets.extend(
+            retry_read(
+                lambda batch=id_batch: client.table("trx_thermovisi_inspection_sheet")
+                .select("inspection_id,source_sheet_name,sheet_role_code")
+                .in_("inspection_id", batch)
+                .execute()
+                .data
+            )
+        )
+    return inspections, sheets
+
+
+def _validate_incremental_import(
+    *,
+    existing_upload: dict[str, Any],
+    existing_inspections: list[dict[str, Any]],
+    existing_sheets: list[dict[str, Any]],
+    template_code: str,
+    selected_sheet_names: set[str],
+    destination_year: int,
+    destination_month: int,
+    work_type: str,
+    stage_code: str,
+) -> None:
+    if existing_upload.get("processing_status") == "PROCESSING":
+        raise ValueError(
+            f"Workbook ini sedang diproses (upload_id {existing_upload['upload_id']}). "
+            "Tunggu proses sebelumnya selesai."
+        )
+    if str(existing_upload.get("template_type") or "") != template_code:
+        raise ValueError(
+            "Workbook yang sama sudah terdaftar dengan template "
+            f"{existing_upload.get('template_type') or '-'}, bukan {template_code}."
+        )
+
+    existing_sheet_by_key = {
+        _sheet_key(row.get("source_sheet_name")): str(row.get("source_sheet_name") or "")
+        for row in existing_sheets
+    }
+    reused = sorted(
+        existing_sheet_by_key[_sheet_key(sheet_name)]
+        for sheet_name in selected_sheet_names
+        if _sheet_key(sheet_name) in existing_sheet_by_key
+    )
+    if reused:
+        raise ValueError(
+            "Sheet berikut sudah pernah diimpor dari workbook ini: "
+            + ", ".join(reused)
+            + ". Pilih hanya sheet yang belum diproses."
+        )
+
+    for inspection in existing_inspections:
+        measurement_date = date.fromisoformat(str(inspection["measurement_date"]))
+        if (measurement_date.year, measurement_date.month) != (
+            destination_year,
+            destination_month,
+        ):
+            raise ValueError(
+                "Workbook yang sama sudah digunakan untuk periode "
+                f"{measurement_date.month:02d}/{measurement_date.year}. "
+                "Impor lanjutan harus memakai bulan dan tahun yang sama."
+            )
+        if (
+            str(inspection.get("work_type") or "") != work_type
+            or str(inspection.get("stage_code") or "") != stage_code
+        ):
+            raise ValueError(
+                "Workbook yang sama sudah digunakan untuk jenis pekerjaan/tahap "
+                f"{inspection.get('work_type')} · {inspection.get('stage_code')}."
+            )
+
+
+def _routine_duplicate_bays(
+    client: Client,
+    *,
+    bay_ids: list[str],
+    destination_year: int,
+    destination_month: int,
+    stage_code: str,
+) -> list[str]:
+    period_start = date(destination_year, destination_month, 1)
+    period_end = (
+        date(destination_year + 1, 1, 1)
+        if destination_month == 12
+        else date(destination_year, destination_month + 1, 1)
+    )
+    rows: list[dict[str, Any]] = []
+    for bay_batch in _value_chunks(bay_ids):
+        rows.extend(
+            retry_read(
+                lambda batch=bay_batch: client.table("trx_thermovisi_inspection")
+                .select("target_functloc_id")
+                .in_("target_functloc_id", batch)
+                .gte("measurement_date", period_start.isoformat())
+                .lt("measurement_date", period_end.isoformat())
+                .eq("work_type", "ROUTINE")
+                .eq("stage_code", stage_code)
+                .execute()
+                .data
+            )
+        )
+    return sorted({str(row["target_functloc_id"]) for row in rows})
+
+
 def _chunks(values: list[dict[str, Any]], size: int = 500) -> Iterable[list[dict[str, Any]]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
+def _value_chunks(values: list[str], size: int = 100) -> Iterable[list[str]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
 
@@ -198,13 +336,55 @@ def save_import(
     telegram_bot_token: str = "",
     telegram_chat_id: str = "",
     location_by_bay: dict[str, dict[str, str]] | None = None,
+    workbook_sheet_count: int | None = None,
 ) -> str:
     digest = file_sha256(file_bytes)
-    duplicate = duplicate_upload(client, digest)
-    if duplicate:
-        raise ValueError(f"File sudah pernah diunggah (status {duplicate['processing_status']}, upload_id {duplicate['upload_id']}).")
+    periods = {
+        (
+            int(metadata["measurement_date"].year),
+            int(metadata["measurement_date"].month),
+        )
+        for metadata in metadata_by_bay.values()
+    }
+    if len(periods) != 1:
+        raise ValueError(
+            "Semua Bay dalam satu file harus memiliki bulan dan tahun pelaksanaan yang sama."
+        )
+    destination_year, destination_month = next(iter(periods))
+    source_upload = duplicate_upload(client, digest)
+    is_incremental = source_upload is not None
+    if source_upload:
+        upload_id = str(source_upload["upload_id"])
+        existing_inspections, existing_sheets = _existing_import_details(client, upload_id)
+        _validate_incremental_import(
+            existing_upload=source_upload,
+            existing_inspections=existing_inspections,
+            existing_sheets=existing_sheets,
+            template_code=template_code,
+            selected_sheet_names=set(sheet_assignments),
+            destination_year=destination_year,
+            destination_month=destination_month,
+            work_type=work_type,
+            stage_code=stage_code,
+        )
+    else:
+        upload_id = str(uuid.uuid4())
 
-    upload_id = str(uuid.uuid4())
+    bay_ids = sorted(metadata_by_bay)
+    if work_type == "ROUTINE":
+        duplicate_bays = _routine_duplicate_bays(
+            client,
+            bay_ids=bay_ids,
+            destination_year=destination_year,
+            destination_month=destination_month,
+            stage_code=stage_code,
+        )
+        if duplicate_bays:
+            raise ValueError(
+                "Inspeksi rutin sudah tersimpan untuk Bay/periode/tahap yang sama: "
+                + ", ".join(duplicate_bays)
+            )
+
     prepared_inspections = prepare_inspection_groups(
         upload_id=upload_id,
         template_code=template_code,
@@ -218,45 +398,34 @@ def save_import(
         stage_code=stage_code,
     )
 
-    periods = {
-        (
-            int(metadata["measurement_date"].year),
-            int(metadata["measurement_date"].month),
+    if not source_upload:
+        drive = upload_excel(
+            file_bytes,
+            filename,
+            mime_type,
+            folder_id,
+            destination_year=destination_year,
+            destination_gi=drive_gi_name,
+            destination_month=destination_month,
+            web_app_url=drive_web_app_url,
+            shared_secret=drive_shared_secret,
         )
-        for metadata in metadata_by_bay.values()
-    }
-    if len(periods) != 1:
-        raise ValueError(
-            "Semua Bay dalam satu file harus memiliki bulan dan tahun pelaksanaan yang sama."
-        )
-    destination_year, destination_month = next(iter(periods))
-    drive = upload_excel(
-        file_bytes,
-        filename,
-        mime_type,
-        folder_id,
-        destination_year=destination_year,
-        destination_gi=drive_gi_name,
-        destination_month=destination_month,
-        web_app_url=drive_web_app_url,
-        shared_secret=drive_shared_secret,
-    )
-    upload_row = {
-        "upload_id": upload_id,
-        "file_provider": "GOOGLE_DRIVE",
-        "drive_file_id": drive["drive_file_id"],
-        "drive_folder_id": folder_id or None,
-        "drive_web_view_link": drive["drive_web_view_link"],
-        "original_filename": filename,
-        "file_hash": digest,
-        "file_size_bytes": len(file_bytes),
-        "mime_type": mime_type,
-        "template_type": template_code,
-        "processing_status": "PROCESSING",
-        "total_sheets": len(parsed_sheets),
-        "uploaded_by": user_id,
-    }
-    client.table("trx_thermovisi_upload").insert(upload_row).execute()
+        upload_row = {
+            "upload_id": upload_id,
+            "file_provider": "GOOGLE_DRIVE",
+            "drive_file_id": drive["drive_file_id"],
+            "drive_folder_id": folder_id or None,
+            "drive_web_view_link": drive["drive_web_view_link"],
+            "original_filename": filename,
+            "file_hash": digest,
+            "file_size_bytes": len(file_bytes),
+            "mime_type": mime_type,
+            "template_type": template_code,
+            "processing_status": "PROCESSING",
+            "total_sheets": workbook_sheet_count or len(parsed_sheets),
+            "uploaded_by": user_id,
+        }
+        client.table("trx_thermovisi_upload").insert(upload_row).execute()
 
     try:
         total_measurements = 0
@@ -329,14 +498,26 @@ def save_import(
                     client.table("trx_thermovisi_anomaly").insert(batch).execute()
                 anomalies_by_inspection.setdefault(inspection_id, []).extend(anomaly_rows)
 
+        previous_processed_sheets = int((source_upload or {}).get("processed_sheets") or 0)
+        previous_measurements = int((source_upload or {}).get("total_measurements") or 0)
+        known_total_sheets = max(
+            int((source_upload or {}).get("total_sheets") or 0),
+            int(workbook_sheet_count or 0),
+            previous_processed_sheets + len(parsed_sheets),
+        )
+        cumulative_processed_sheets = previous_processed_sheets + len(parsed_sheets)
+        cumulative_measurements = previous_measurements + total_measurements
         client.table("trx_thermovisi_upload").update({
             "processing_status": "COMPLETED",
             "processing_message": (
-                f"Import berhasil: {total_measurements} pengukuran, "
-                f"{total_evaluations} evaluasi"
+                f"Import {'lanjutan' if is_incremental else 'awal'} berhasil: "
+                f"{len(parsed_sheets)} sheet, {total_measurements} pengukuran, "
+                f"{total_evaluations} evaluasi. Total diproses: "
+                f"{cumulative_processed_sheets}/{known_total_sheets} sheet."
             ),
-            "processed_sheets": len(parsed_sheets),
-            "total_measurements": total_measurements,
+            "total_sheets": known_total_sheets,
+            "processed_sheets": cumulative_processed_sheets,
+            "total_measurements": cumulative_measurements,
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }).eq("upload_id", upload_id).execute()
 
@@ -386,9 +567,10 @@ def save_import(
                         pass
         return upload_id
     except Exception as exc:
-        client.table("trx_thermovisi_upload").update({
-            "processing_status": "FAILED",
-            "processing_message": str(exc)[:1000],
-            "processed_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("upload_id", upload_id).execute()
+        if not is_incremental:
+            client.table("trx_thermovisi_upload").update({
+                "processing_status": "FAILED",
+                "processing_message": str(exc)[:1000],
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("upload_id", upload_id).execute()
         raise

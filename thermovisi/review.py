@@ -122,6 +122,10 @@ def build_sheet_review(
             {
                 "No.": int(item.get("sequence_no") or 0),
                 "Template item ID": item_id,
+                "Point code": item.get("point_code"),
+                "Equipment group code": item.get("equipment_group_code"),
+                "Comparison group code": item.get("comparison_group_code"),
+                "Comparison role": item.get("comparison_role"),
                 "Bagian": item.get("form_section_code"),
                 "Peralatan": item.get("raw_equipment_label") or item.get("equipment_group_code"),
                 "Titik peralatan yang diperiksa": item.get("raw_point_label"),

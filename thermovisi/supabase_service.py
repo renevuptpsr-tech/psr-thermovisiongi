@@ -10,7 +10,7 @@ from supabase import Client, create_client
 from .excel_parser import ParsedSheet
 from .google_drive import upload_excel
 from .retry import retry_read
-from .storage_model import prepare_inspection_groups
+from .storage_model import prepare_evaluation_rows, prepare_inspection_groups
 
 
 def make_client(url: str, publishable_key: str, access_token: str | None = None, refresh_token: str | None = None) -> Client:
@@ -139,6 +139,7 @@ def save_import(
     parsed_sheets: list[ParsedSheet],
     sheet_assignments: dict[str, dict[str, str]],
     metadata_by_bay: dict[str, dict[str, Any]],
+    review_rows_by_bay: dict[str, list[dict[str, Any]]],
     executor: str | None,
     notes: str | None,
     user_id: str,
@@ -202,6 +203,7 @@ def save_import(
 
     try:
         total_measurements = 0
+        total_evaluations = 0
         for prepared in prepared_inspections:
             inspection = prepared["inspection"]
             ambient_c = prepared["ambient_temperature_c"]
@@ -245,9 +247,27 @@ def save_import(
                     client.table("trx_thermovisi_measurement").insert(batch).execute()
                 total_measurements += len(rows)
 
+                sheet_item_ids = {
+                    int(measurement.template_item_id)
+                    for measurement in parsed.measurements
+                }
+                evaluation_rows = prepare_evaluation_rows(
+                    inspection_id=inspection_id,
+                    inspection_sheet_id=inspection_sheet_id,
+                    review_rows=review_rows_by_bay.get(prepared["bay_id"], []),
+                    sheet_template_item_ids=sheet_item_ids,
+                    metadata=metadata_by_bay[prepared["bay_id"]],
+                )
+                for batch in _chunks(evaluation_rows):
+                    client.table("trx_thermovisi_evaluation").insert(batch).execute()
+                total_evaluations += len(evaluation_rows)
+
         client.table("trx_thermovisi_upload").update({
             "processing_status": "COMPLETED",
-            "processing_message": "Import berhasil",
+            "processing_message": (
+                f"Import berhasil: {total_measurements} pengukuran, "
+                f"{total_evaluations} evaluasi"
+            ),
             "processed_sheets": len(parsed_sheets),
             "total_measurements": total_measurements,
             "processed_at": datetime.now(timezone.utc).isoformat(),

@@ -42,7 +42,20 @@ function doPost(e) {
     }
 
     const blob = Utilities.newBlob(bytes, payload.mime_type, payload.filename);
-    const file = DriveApp.getFolderById(targetFolderId).createFile(blob);
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(30000)) {
+      throw new Error("Gateway sedang memproses upload lain. Silakan coba kembali.");
+    }
+    let file;
+    try {
+      let destination = DriveApp.getFolderById(targetFolderId);
+      destination = getOrCreateFolder_(destination, payload.destination_year);
+      destination = getOrCreateFolder_(destination, payload.destination_gi);
+      destination = getOrCreateFolder_(destination, payload.destination_month);
+      file = destination.createFile(blob);
+    } finally {
+      lock.releaseLock();
+    }
     CacheService.getScriptCache().put("nonce:" + payload.nonce, "1", 600);
     return jsonResponse_({
       ok: true,
@@ -58,6 +71,7 @@ function doPost(e) {
 function validatePayload_(payload, targetFolderId, sharedSecret) {
   const required = [
     "timestamp", "nonce", "filename", "mime_type", "folder_id",
+    "destination_year", "destination_gi", "destination_month",
     "file_sha256", "signature", "file_base64"
   ];
   required.forEach(function(key) {
@@ -78,6 +92,13 @@ function validatePayload_(payload, targetFolderId, sharedSecret) {
   if (String(payload.folder_id) !== String(targetFolderId)) {
     throw new Error("Folder tujuan tidak diizinkan.");
   }
+  if (!/^\d{4}$/.test(String(payload.destination_year))) {
+    throw new Error("Folder tahun tidak valid.");
+  }
+  if (!/^(0[1-9]|1[0-2]) - [A-Z]+$/.test(String(payload.destination_month))) {
+    throw new Error("Folder bulan tidak valid.");
+  }
+  validateFolderName_(String(payload.destination_gi), "Gardu Induk");
   const filename = String(payload.filename);
   if (filename.includes("/") || filename.includes("\\") || filename.length > 180) {
     throw new Error("Nama file tidak valid.");
@@ -95,6 +116,9 @@ function validatePayload_(payload, targetFolderId, sharedSecret) {
     filename,
     String(payload.mime_type),
     String(payload.folder_id),
+    String(payload.destination_year),
+    String(payload.destination_gi),
+    String(payload.destination_month),
     String(payload.file_sha256)
   ].join("\n");
   const expectedSignature = bytesToHex_(
@@ -103,6 +127,17 @@ function validatePayload_(payload, targetFolderId, sharedSecret) {
   if (!constantTimeEqual_(expectedSignature, String(payload.signature))) {
     throw new Error("Signature upload tidak valid.");
   }
+}
+
+function validateFolderName_(name, label) {
+  if (!name || name.length > 120 || /[\\/:*?"<>|]/.test(name)) {
+    throw new Error("Nama folder " + label + " tidak valid.");
+  }
+}
+
+function getOrCreateFolder_(parent, name) {
+  const folders = parent.getFoldersByName(String(name));
+  return folders.hasNext() ? folders.next() : parent.createFolder(String(name));
 }
 
 function bytesToHex_(bytes) {

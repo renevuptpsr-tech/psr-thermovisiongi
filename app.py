@@ -912,6 +912,7 @@ with st.container(border=True):
                         }
                         for row in selected_bay_rows
                     },
+                    workbook_sheet_count=len(parsed),
                 )
                 st.success(f"Import selesai. Upload ID: {upload_id}")
                 st.session_state.parsed = None

@@ -64,7 +64,7 @@ Role `authenticated` perlu `SELECT` pada tiga view dropdown dan tabel referensi 
 
 ## Google Drive
 
-Aktifkan Google Drive API, buat service account, lalu bagikan folder tujuan kepada `client_email` service account dengan akses Editor. Buat key bertipe JSON dan salin seluruh nilai dari file JSON tersebut ke bagian `[google_service_account]` pada `.streamlit/secrets.toml`. Jangan membiarkan nilai contoh/placeholder `...`, terutama pada `private_key`. File tidak disimpan di Supabase Storage.
+Aktifkan Google Drive API dan buat **OAuth Client ID** bertipe **Desktop app**. Salin bagian `installed` dari JSON OAuth ke `[google_oauth]` pada `.streamlit/secrets.toml`. Aplikasi tidak memakai private key Service Account. Pengguna menghubungkan akun Google melalui browser, sedangkan refresh token disimpan lokal pada `.streamlit/google_drive_token.json` dan diabaikan Git.
 
 Folder penyimpanan proyek ini menggunakan ID `1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i`. Isi konfigurasi berikut; aplikasi juga dapat menormalisasi URL folder lengkap menjadi ID tersebut:
 
@@ -73,16 +73,18 @@ Folder penyimpanan proyek ini menggunakan ID `1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i`
 folder_id = "1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i"
 ```
 
-`private_key` harus memuat header, isi key, dan footer lengkap:
-
 ```toml
-private_key = """-----BEGIN PRIVATE KEY-----
-ISI_KEY_DARI_JSON_TANPA_DIUBAH
------END PRIVATE KEY-----
-"""
+[google_oauth]
+project_id = "PROJECT_ID_DARI_JSON"
+client_id = "CLIENT_ID_DARI_JSON"
+client_secret = "CLIENT_SECRET_DARI_JSON"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+redirect_uris = ["http://localhost"]
 ```
 
-Jika menulis key dalam satu baris, pemisah baris literal `\\n` dari JSON juga didukung. Jangan mengunggah atau melakukan commit terhadap `.streamlit/secrets.toml` karena file tersebut berisi kredensial rahasia.
+Klik **Hubungkan Google Drive** pada aplikasi dan selesaikan login di browser. Jangan commit `.streamlit/secrets.toml` atau `.streamlit/google_drive_token.json`.
 
 ## Catatan validasi
 

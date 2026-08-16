@@ -201,6 +201,7 @@ def test_compact_review_uses_one_measurement_column_for_phase_and_single_values(
             "Suhu maksimum (°C)": 33.0,
             "Kenaikan maks. terhadap lingkungan (°C)": 3.0,
             "Pola gradasi": None, "Kondisi": "Normal",
+            "AHI Thermovisi": 1, "Kategori AHI": "Very Good",
             "Kesimpulan / rekomendasi": "Inspeksi rutin.",
             "Status data": "VALID", "Status analisa": "TEREVALUASI",
         },
@@ -212,6 +213,7 @@ def test_compact_review_uses_one_measurement_column_for_phase_and_single_values(
             "Suhu maksimum (°C)": None,
             "Kenaikan maks. terhadap lingkungan (°C)": None,
             "Pola gradasi": None, "Kondisi": "",
+            "AHI Thermovisi": None, "Kategori AHI": None,
             "Kesimpulan / rekomendasi": "", "Status data": "VALID",
             "Status analisa": "BELUM DIEVALUASI",
         },
@@ -223,7 +225,8 @@ def test_compact_review_uses_one_measurement_column_for_phase_and_single_values(
     assert compact[1]["Pengukuran"] == "45,5 °C"
     assert set(compact[0]) == {
         "No.", "Peralatan", "Titik yang diperiksa", "Pengukuran",
-        "Delta T", "Kondisi", "Kesimpulan / Rekomendasi", "Status Data",
+        "Delta T", "Kondisi", "AHI Thermovisi",
+        "Kesimpulan / Rekomendasi", "Status Data",
     }
 
 
@@ -234,6 +237,7 @@ def test_invalid_compact_review_row_is_colored_red():
         {
             "No.": 1, "Peralatan": "Bushing", "Titik yang diperiksa": "Primer",
             "Pengukuran": "—", "Delta T": "—", "Kondisi": "—",
+            "AHI Thermovisi": "Tidak dapat dievaluasi",
             "Kesimpulan / Rekomendasi": "Nilai wajib kosong", "Status Data": "INVALID",
         }
     )

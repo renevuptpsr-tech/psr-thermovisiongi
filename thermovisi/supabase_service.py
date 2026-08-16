@@ -97,7 +97,8 @@ def fetch_bays(client: Client, ultg_flc: str, gi_flc: str) -> list[dict[str, Any
         lambda: client.table("v_thermovisi_eligible_bay")
         .select(
             "ultg_flc,ultg_name,gi_flc,gi_name,bay_flc,bay_name,bay_short_name,"
-            "bay_function_code,bay_function_name,voltage_code"
+            "bay_function_code,bay_function_name,voltage_code,is_routine_required,"
+            "monitoring_category"
         )
         .eq("ultg_flc", ultg_flc)
         .eq("gi_flc", gi_flc)
@@ -112,6 +113,7 @@ def fetch_eligible_bays(
     *,
     ultg_flc: str | None = None,
     gi_flc: str | None = None,
+    required_only: bool = False,
 ) -> list[dict[str, Any]]:
     def read():
         query = client.table("v_thermovisi_eligible_bay").select("*")
@@ -119,6 +121,8 @@ def fetch_eligible_bays(
             query = query.eq("ultg_flc", ultg_flc)
         if gi_flc:
             query = query.eq("gi_flc", gi_flc)
+        if required_only:
+            query = query.eq("is_routine_required", True)
         return query.order("gi_name").order("bay_name").execute().data
 
     return retry_read(read)

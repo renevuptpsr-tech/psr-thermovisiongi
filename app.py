@@ -802,6 +802,13 @@ with st.container(border=True):
     drive_shared_secret = (
         str(drive_info.get("shared_secret", "")).strip() if drive_info else ""
     )
+    telegram_info = st.secrets.get("telegram", {})
+    telegram_bot_token = (
+        str(telegram_info.get("bot_token", "")).strip() if telegram_info else ""
+    )
+    telegram_chat_id = (
+        str(telegram_info.get("chat_id", "")).strip() if telegram_info else ""
+    )
     gateway_error: str | None = None
     try:
         validate_gateway_config(drive_web_app_url, drive_shared_secret)
@@ -815,6 +822,13 @@ with st.container(border=True):
         st.warning("google_drive.folder_id belum dikonfigurasi pada secrets.toml.")
     if not gateway_error and drive_folder_id:
         st.success("Gateway Apps Script Google Drive siap digunakan.")
+    if telegram_bot_token and telegram_chat_id:
+        st.success("Notifikasi anomali Telegram siap digunakan.")
+    else:
+        st.warning(
+            "Telegram belum dikonfigurasi. Anomali tetap tersimpan, tetapi notifikasi "
+            "akan berstatus PENDING."
+        )
 
     ready = (
         mapping_complete
@@ -858,6 +872,18 @@ with st.container(border=True):
                     user_id=st.session_state.auth["user_id"],
                     work_type=import_work_type,
                     stage_code=import_stage,
+                    telegram_bot_token=telegram_bot_token,
+                    telegram_chat_id=telegram_chat_id,
+                    location_by_bay={
+                        str(row["bay_flc"]): {
+                            "ultg_name": str(row.get("ultg_name") or ultg_flc),
+                            "gi_name": str(row.get("gi_name") or gi_flc),
+                            "bay_name": str(
+                                row.get("bay_short_name") or row.get("bay_name") or row["bay_flc"]
+                            ),
+                        }
+                        for row in selected_bay_rows
+                    },
                 )
                 st.success(f"Import selesai. Upload ID: {upload_id}")
                 st.session_state.parsed = None

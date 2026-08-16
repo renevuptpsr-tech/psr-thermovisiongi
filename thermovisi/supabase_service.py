@@ -55,7 +55,7 @@ def fetch_template_items(client: Client, template_code: str) -> list[dict[str, A
         "source_occurrence_no,raw_equipment_label,raw_point_label,equipment_group_code,point_code,"
         "measurement_mode_code,phase_codes,source_value_map,section_code,terminal_side_code,"
         "position_code,instance_no,winding_code,terminal_voltage_kv,comparison_group_code,"
-        "comparison_role,is_required"
+        "comparison_role,analysis_rule_code,is_required"
     )
     return retry_read(
         lambda: (

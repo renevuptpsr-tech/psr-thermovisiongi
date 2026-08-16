@@ -429,7 +429,11 @@ with st.container(border=True):
             if template_code not in reference_cache["template_items"]:
                 reference_cache["template_items"][template_code] = fetch_template_items(client, template_code)
             items = reference_cache["template_items"][template_code]
-            parsed, warnings = parse_workbook(uploaded.getvalue(), items)
+            parsed, warnings = parse_workbook(
+                uploaded.getvalue(),
+                items,
+                include_unmatched_sheets=True,
+            )
             st.session_state.parsed = parsed
             st.session_state.parse_warnings = warnings
         except Exception as exc:
@@ -458,7 +462,7 @@ with st.container(border=True):
     st.caption(
         (
             "Template Trafo menggunakan Sheet Trafo dan Sheet Bay untuk setiap Bay. "
-            "Nama sheet bebas; aplikasi memvalidasi bagian form dari isi titik ukurnya."
+            "Nama sheet bebas dan perannya mengikuti pilihan pengguna."
         )
         if is_trafo_two_sheet
         else (
@@ -467,12 +471,6 @@ with st.container(border=True):
         )
     )
     sheet_names = [parsed_sheet.sheet_name for parsed_sheet in parsed]
-    sheet_sections = {
-        parsed_sheet.sheet_name: {
-            measurement.form_section_code for measurement in parsed_sheet.measurements
-        }
-        for parsed_sheet in parsed
-    }
     if is_trafo_two_sheet:
         mapping_seed = pd.DataFrame(
             [
@@ -507,7 +505,7 @@ with st.container(border=True):
             mapping_editor.to_dict("records"),
             expected_bay_ids=selected_bay_ids,
             valid_sheet_names=sheet_names,
-            sheet_sections=sheet_sections,
+            sheet_sections=None,
         )
     else:
         mapping_seed = pd.DataFrame(
@@ -536,19 +534,50 @@ with st.container(border=True):
             expected_bay_ids=selected_bay_ids,
             valid_sheet_names=sheet_names,
         )
+        single_sections = {
+            str(item.get("form_section_code") or "MAIN") for item in template_items
+        }
+        single_section = next(iter(single_sections)) if len(single_sections) == 1 else "MAIN"
         sheet_assignments = {
             sheet_name: {
                 "bay_flc": bay_id,
                 "sheet_role": "MAIN",
-                "form_section_code": next(iter(sheet_sections.get(sheet_name, {"MAIN"}))),
+                "form_section_code": single_section,
             }
             for sheet_name, bay_id in single_mapping.items()
         }
-    for message in mapping_errors:
-        st.warning(message)
     mapping_complete = not mapping_errors
 
-    parsed_by_name = {item.sheet_name: item for item in parsed}
+    if mapping_complete:
+        try:
+            mapped_parsed, mapped_warnings = parse_workbook(
+                uploaded.getvalue(),
+                template_items,
+                forced_section_by_sheet={
+                    sheet_name: assignment["form_section_code"]
+                    for sheet_name, assignment in sheet_assignments.items()
+                },
+                selected_sheet_names=set(sheet_assignments),
+            )
+            for warning in mapped_warnings:
+                st.warning(warning)
+            reparsed_names = {item.sheet_name for item in mapped_parsed}
+            missing_selected = sorted(set(sheet_assignments) - reparsed_names)
+            if missing_selected:
+                mapping_errors.append(
+                    "Sheet yang dipilih belum dapat dibaca menggunakan bagian form yang ditentukan: "
+                    + ", ".join(missing_selected)
+                )
+                mapping_complete = False
+        except Exception as exc:
+            mapped_parsed = []
+            mapping_errors.append(f"Sheet yang dipilih tidak dapat dibaca: {exc}")
+            mapping_complete = False
+    else:
+        mapped_parsed = []
+    for message in mapping_errors:
+        st.warning(message)
+    parsed_by_name = {item.sheet_name: item for item in mapped_parsed}
     sheet_to_bay = {
         sheet_name: assignment["bay_flc"]
         for sheet_name, assignment in sheet_assignments.items()
@@ -558,7 +587,6 @@ with st.container(border=True):
         assignments_by_bay.setdefault(assignment["bay_flc"], {})[
             assignment["sheet_role"]
         ] = sheet_name
-    mapped_parsed = [parsed_by_name[name] for name in sheet_to_bay if name in parsed_by_name]
     if mapping_complete:
         if is_trafo_two_sheet:
             confirmation_rows = [

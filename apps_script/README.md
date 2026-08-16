@@ -11,5 +11,8 @@
    - Who has access: Anyone
 6. Salin URL deployment yang berakhir /exec ke .streamlit/secrets.toml.
 
+File disimpan otomatis dengan hierarki:
+TAHUN / NAMA GARDU INDUK / NN - NAMA BULAN / NAMA FILE.
+
 Setiap perubahan Code.gs harus diterbitkan sebagai versi deployment baru melalui
 Deploy > Manage deployments > Edit > New version > Deploy.

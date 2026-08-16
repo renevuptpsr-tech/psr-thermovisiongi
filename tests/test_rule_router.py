@@ -29,6 +29,7 @@ def test_all_current_rule_families_are_registered():
         "PMT_CLAMP", "PMT_INTERRUPTER", "PMT_GRADING_CAPACITOR",
         "PMT_INSULATOR", "PMS_BLADE", "PMS_MAIN_TERMINAL", "PMS_INSULATOR", "CVT_PT_COMPONENT",
         "CT_CLAMP", "CT_INSULATOR_HOUSING", "LA_NORMALIZED",
+        "GENERAL_CLAMP_CONDUCTOR", "GENERAL_NETA_PHASE",
     } <= codes
 
 

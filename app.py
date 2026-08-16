@@ -16,6 +16,7 @@ from thermovisi.mapping import (
     trafo_sheet_mapping_from_bays,
 )
 from thermovisi.review import build_sheet_review, compact_review_rows, style_compact_review
+from thermovisi.review_validator import validate_bay_review, validation_summary_row
 from thermovisi.supabase_service import (
     fetch_bays,
     fetch_gi,
@@ -133,6 +134,7 @@ for key, value in {
     "parsed": None,
     "parse_warnings": [],
     "parse_signature": None,
+    "review_validation_signature": None,
 }.items():
     st.session_state.setdefault(key, value)
 
@@ -562,11 +564,29 @@ with st.container(border=True):
         disabled=not review_options,
     )
 
+    review_rows_by_bay: dict[str, list[dict[str, Any]]] = {}
+    template_items = reference_cache["template_items"][template_code]
+    for bay_id in review_options.values():
+        bay_rows: list[dict[str, Any]] = []
+        roles = ("TRAFO", "BAY") if is_trafo_two_sheet else ("MAIN",)
+        for role in roles:
+            review_sheet = parsed_by_name[assignments_by_bay[bay_id][role]]
+            review_metadata = metadata_by_bay[bay_id]
+            bay_rows.extend(
+                build_sheet_review(
+                    review_sheet,
+                    template_items,
+                    measurement_current_a=float(review_metadata["measurement_current_a"]),
+                    monthly_peak_current_a=float(review_metadata["monthly_peak_current_a"]),
+                    ambient_temperature_c=float(review_metadata["ambient_temperature_c"]),
+                )
+            )
+        review_rows_by_bay[bay_id] = bay_rows
+
     all_review_rows: list[dict[str, Any]] = []
     if review_choice:
         review_bay_id = review_options[review_choice]
         review_metadata = metadata_by_bay[review_bay_id]
-        template_items = reference_cache["template_items"][template_code]
 
         info_1, info_2, info_3 = st.columns(3)
         info_1.metric("Beban ukur", f"{review_metadata['measurement_current_a']:.2f} A")
@@ -582,13 +602,13 @@ with st.container(border=True):
             with tab:
                 review_sheet_name = assignments_by_bay[review_bay_id][role]
                 review_sheet = parsed_by_name[review_sheet_name]
-                review_rows = build_sheet_review(
-                    review_sheet,
-                    template_items,
-                    measurement_current_a=float(review_metadata["measurement_current_a"]),
-                    monthly_peak_current_a=float(review_metadata["monthly_peak_current_a"]),
-                    ambient_temperature_c=float(review_metadata["ambient_temperature_c"]),
-                )
+                sheet_item_ids = {
+                    measurement.template_item_id for measurement in review_sheet.measurements
+                }
+                review_rows = [
+                    row for row in review_rows_by_bay[review_bay_id]
+                    if row.get("Template item ID") in sheet_item_ids
+                ]
                 all_review_rows.extend(review_rows)
                 st.caption(
                     f"{role_label}: {review_sheet_name} · "
@@ -622,6 +642,9 @@ with st.container(border=True):
                         "Status Data": st.column_config.TextColumn(
                             "Status Data", width="small"
                         ),
+                        "Status Analisa": st.column_config.TextColumn(
+                            "Status Analisa", width="medium"
+                        ),
                     },
                 )
                 with st.expander("Lihat detail teknis lengkap"):
@@ -648,10 +671,58 @@ with st.container(border=True):
 
     st.divider()
     st.markdown("#### Validasi sebelum penyimpanan")
+    initial_validations = {
+        bay_id: validate_bay_review(rows)
+        for bay_id, rows in review_rows_by_bay.items()
+    }
+    incomplete_total = sum(item.incomplete_rows for item in initial_validations.values())
+    accept_incomplete = st.checkbox(
+        "Saya memahami dan menyetujui penyimpanan titik dengan data tidak lengkap.",
+        value=False,
+        disabled=incomplete_total == 0,
+        help="Tidak diperlukan untuk titik NOT_MEASURED atau NOT_APPLICABLE.",
+    )
+    validations = {
+        bay_id: validate_bay_review(rows, accept_incomplete=accept_incomplete)
+        for bay_id, rows in review_rows_by_bay.items()
+    }
+    summary_rows = [
+        validation_summary_row(
+            bay_label(selected_bay_by_id[bay_id]), validation
+        )
+        for bay_id, validation in validations.items()
+    ]
+    if summary_rows:
+        st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
+
+    all_bays_ready = bool(validations) and all(item.ready for item in validations.values())
+    validation_signature = repr(
+        (
+            parse_signature,
+            template_code,
+            assignments_by_bay,
+            metadata_by_bay,
+            accept_incomplete,
+        )
+    )
+    if st.button(
+        "Validasi seluruh Bay",
+        type="secondary",
+        disabled=not mapping_complete or not all_bays_ready,
+        width="stretch",
+    ):
+        st.session_state.review_validation_signature = validation_signature
+        st.success("Seluruh Bay lolos validasi dan siap untuk persetujuan akhir.")
+    validation_approved = (
+        st.session_state.review_validation_signature == validation_signature
+    )
+    if not all_bays_ready:
+        st.error("Masih ada Bay yang diblokir atau memerlukan konfirmasi data tidak lengkap.")
+
     review_confirmed = st.checkbox(
         "Saya telah memeriksa seluruh pasangan Bay–Sheet, hasil pengukuran, dan analisa.",
         value=False,
-        disabled=not mapping_complete or total_invalid > 0,
+        disabled=not validation_approved,
     )
     if not review_confirmed:
         st.info("Penyimpanan masih dikunci. Selesaikan review seluruh sheet terlebih dahulu.")
@@ -681,6 +752,7 @@ with st.container(border=True):
         storage_model_ready
         and
         mapping_complete
+        and validation_approved
         and review_confirmed
         and not metadata_errors
         and total_invalid == 0

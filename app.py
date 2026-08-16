@@ -95,7 +95,8 @@ def stop_for_reference_error(error: Exception) -> None:
 
 def bay_label(row: dict[str, Any]) -> str:
     short_name = (row.get("bay_short_name") or row.get("bay_name") or "Bay").strip()
-    return f"{short_name} — {row['bay_flc']}"
+    optional = " · Opsional" if row.get("monitoring_category") == "OPTIONAL" else ""
+    return f"{short_name}{optional} — {row['bay_flc']}"
 
 
 def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]], list[str]]:

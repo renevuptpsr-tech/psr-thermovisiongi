@@ -155,3 +155,54 @@ def test_blank_required_cell_remains_invalid():
     sheets, warnings = parse_workbook(buffer.getvalue(), items)
     assert sheets == []
     assert any("tidak berisi nilai angka" in warning for warning in warnings)
+
+
+def test_all_workbook_sheets_are_available_before_manual_mapping():
+    wb = Workbook()
+    wb.active.title = "TD 1"
+    wb.create_sheet("TD 2")
+    buffer = BytesIO()
+    wb.save(buffer)
+    items = [{
+        "template_item_id": 1, "form_section_code": "B", "sequence_no": 1,
+        "source_row_no": 10, "source_occurrence_no": 1, "raw_point_label": "Titik Bay",
+        "equipment_group_code": "PMT", "point_code": "POINT_B",
+        "measurement_mode_code": "SINGLE", "phase_codes": [],
+        "source_value_map": {"VALUE": "E"}, "is_required": True,
+    }]
+
+    sheets, _ = parse_workbook(
+        buffer.getvalue(), items, include_unmatched_sheets=True
+    )
+
+    assert [sheet.sheet_name for sheet in sheets] == ["TD 1", "TD 2"]
+
+
+def test_manual_sheet_role_forces_the_selected_template_section():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "TD 2"
+    ws["E10"] = 41.5
+    buffer = BytesIO()
+    wb.save(buffer)
+    common = {
+        "source_row_no": 10, "source_occurrence_no": 1,
+        "equipment_group_code": "PMT", "measurement_mode_code": "SINGLE",
+        "phase_codes": [], "source_value_map": {"VALUE": "E"}, "is_required": True,
+    }
+    items = [
+        dict(common, template_item_id=1, form_section_code="A", sequence_no=1,
+             raw_point_label="Titik Trafo", point_code="POINT_A"),
+        dict(common, template_item_id=2, form_section_code="B", sequence_no=1,
+             raw_point_label="Titik Bay", point_code="POINT_B"),
+    ]
+
+    sheets, _ = parse_workbook(
+        buffer.getvalue(),
+        items,
+        forced_section_by_sheet={"TD 2": "B"},
+        selected_sheet_names={"TD 2"},
+    )
+
+    assert [item.form_section_code for item in sheets[0].measurements] == ["B"]
+    assert sheets[0].measurements[0].temperature_c == 41.5

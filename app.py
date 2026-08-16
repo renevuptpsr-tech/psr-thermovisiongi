@@ -39,13 +39,11 @@ st.markdown(
       .block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1500px;}
       h1, h2, h3 {letter-spacing: -0.02em;}
       [data-testid="stMetric"] {background: #f5f9fa; border: 1px solid #dbe8eb; padding: 0.8rem 1rem; border-radius: 0.75rem;}
-      section[data-testid="stSidebar"] [data-testid="stRadio"] label {
-        padding: 0.55rem 0.7rem;
-        border-radius: 0.55rem;
-        margin-bottom: 0.2rem;
-      }
-      section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
-        background: #eef6f7;
+      section[data-testid="stSidebar"] .stButton > button {
+        min-height: 2.8rem;
+        justify-content: flex-start;
+        font-weight: 600;
+        letter-spacing: 0.01em;
       }
     </style>
     """,
@@ -148,6 +146,7 @@ for key, value in {
     "review_validation_signature": None,
 }.items():
     st.session_state.setdefault(key, value)
+st.session_state.setdefault("active_page", "IMPORT DATA")
 
 if not secret("SUPABASE_URL") or not secret("SUPABASE_KEY"):
     st.error("SUPABASE_URL dan SUPABASE_KEY belum dikonfigurasi.")
@@ -213,12 +212,25 @@ except Exception as exc:
 with st.sidebar:
     st.divider()
     st.caption("NAVIGASI UTAMA")
-    active_page = st.radio(
-        "Menu",
-        ["IMPORT DATA", "MONITORING"],
-        label_visibility="collapsed",
-        key="active_page",
-    )
+    if st.button(
+        "IMPORT DATA",
+        type="primary" if st.session_state.active_page == "IMPORT DATA" else "secondary",
+        width="stretch",
+        key="nav_import",
+    ):
+        if st.session_state.active_page != "IMPORT DATA":
+            st.session_state.active_page = "IMPORT DATA"
+            st.rerun()
+    if st.button(
+        "MONITORING",
+        type="primary" if st.session_state.active_page == "MONITORING" else "secondary",
+        width="stretch",
+        key="nav_monitoring",
+    ):
+        if st.session_state.active_page != "MONITORING":
+            st.session_state.active_page = "MONITORING"
+            st.rerun()
+    active_page = st.session_state.active_page
 
 if active_page == "MONITORING":
     render_upload_monitoring_page(

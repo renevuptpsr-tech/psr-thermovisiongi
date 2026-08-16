@@ -9,6 +9,7 @@ from .rule_router import route_for_item
 from .rules_ct import evaluate_ct_clamp, evaluate_ct_insulator_housing
 from .rules_cvt_pt import evaluate_cvt_pt_component
 from .rules_la import evaluate_la_normalized
+from .rules_insulator import evaluate_insulator_neta
 from .rules_pms import evaluate_pms_blade, evaluate_pms_main_terminal
 from .rules_pmt import (
     evaluate_grading_capacitor,
@@ -101,6 +102,10 @@ def _phase_result(
         return evaluate_interrupter_chamber(temperatures, ambient_temperature_c)
     if code == "PMS_BLADE":
         return evaluate_pms_blade(temperatures, ambient_temperature_c)
+    if code == "PMT_INSULATOR":
+        return evaluate_insulator_neta("PMT", temperatures, ambient_temperature_c)
+    if code == "PMS_INSULATOR":
+        return evaluate_insulator_neta("PMS", temperatures, ambient_temperature_c)
     if code == "CVT_PT_COMPONENT":
         return evaluate_cvt_pt_component(
             _component_for_cvt(item), temperatures, ambient_temperature_c

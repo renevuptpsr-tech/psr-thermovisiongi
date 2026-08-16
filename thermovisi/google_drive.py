@@ -36,6 +36,9 @@ def build_upload_envelope(
     filename: str,
     mime_type: str,
     folder_id: str,
+    destination_year: int,
+    destination_gi: str,
+    destination_month: int,
     shared_secret: str,
     timestamp: int | None = None,
     nonce: str | None = None,
@@ -44,8 +47,24 @@ def build_upload_envelope(
     timestamp = int(timestamp if timestamp is not None else time.time())
     nonce = nonce or uuid.uuid4().hex
     file_hash = hashlib.sha256(file_bytes).hexdigest()
+    month_names = (
+        "JANUARI", "FEBRUARI", "MARET", "APRIL", "MEI", "JUNI",
+        "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DESEMBER",
+    )
+    if not 1 <= int(destination_month) <= 12:
+        raise ValueError("Bulan folder Google Drive harus berada pada 1 sampai 12.")
+    year_folder = str(int(destination_year))
+    gi_folder = str(destination_gi or "").strip()
+    month_folder = f"{int(destination_month):02d} - {month_names[int(destination_month) - 1]}"
+    if not re.fullmatch(r"\d{4}", year_folder):
+        raise ValueError("Tahun folder Google Drive tidak valid.")
+    if not gi_folder:
+        raise ValueError("Nama Gardu Induk untuk folder Google Drive kosong.")
     canonical = "\n".join(
-        (str(timestamp), nonce, filename, mime_type, normalized_folder_id, file_hash)
+        (
+            str(timestamp), nonce, filename, mime_type, normalized_folder_id,
+            year_folder, gi_folder, month_folder, file_hash,
+        )
     )
     signature = hmac.new(
         shared_secret.encode("utf-8"),
@@ -58,6 +77,9 @@ def build_upload_envelope(
         "filename": filename,
         "mime_type": mime_type,
         "folder_id": normalized_folder_id,
+        "destination_year": year_folder,
+        "destination_gi": gi_folder,
+        "destination_month": month_folder,
         "file_sha256": file_hash,
         "signature": signature,
         "file_base64": base64.b64encode(file_bytes).decode("ascii"),
@@ -70,6 +92,9 @@ def upload_excel(
     mime_type: str,
     folder_id: str,
     *,
+    destination_year: int,
+    destination_gi: str,
+    destination_month: int,
     web_app_url: str,
     shared_secret: str,
     timeout_seconds: int = 120,
@@ -82,6 +107,9 @@ def upload_excel(
         filename=filename,
         mime_type=mime_type,
         folder_id=folder_id,
+        destination_year=destination_year,
+        destination_gi=destination_gi,
+        destination_month=destination_month,
         shared_secret=secret,
     )
     try:

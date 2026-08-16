@@ -1,4 +1,26 @@
-from thermovisi.mapping import sheet_mapping_from_bays, trafo_sheet_mapping_from_bays
+from thermovisi.mapping import (
+    SINGLE_SHEET_MODE,
+    TRAFO_TWO_SHEET_MODE,
+    mapping_mode_from_template,
+    sheet_mapping_from_bays,
+    trafo_sheet_mapping_from_bays,
+)
+
+
+def test_only_trafo_template_requires_two_sheets():
+    mode = mapping_mode_from_template(
+        {"template_code": "THERMOVISI_TRAFO_V1", "template_name": "Trafo Daya"},
+        [{"form_section_code": "A"}, {"form_section_code": "B"}],
+    )
+    assert mode == TRAFO_TWO_SHEET_MODE
+
+
+def test_non_trafo_template_uses_one_sheet():
+    mode = mapping_mode_from_template(
+        {"template_code": "THERMOVISI_PHT_150_V1", "template_name": "PHT 150 kV"},
+        [{"form_section_code": "MAIN"}],
+    )
+    assert mode == SINGLE_SHEET_MODE
 
 
 def test_mapping_is_defined_from_each_bay():

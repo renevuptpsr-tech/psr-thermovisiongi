@@ -64,27 +64,22 @@ Role `authenticated` perlu `SELECT` pada tiga view dropdown dan tabel referensi 
 
 ## Google Drive
 
-Aktifkan Google Drive API dan buat **OAuth Client ID** bertipe **Desktop app**. Salin bagian `installed` dari JSON OAuth ke `[google_oauth]` pada `.streamlit/secrets.toml`. Aplikasi tidak memakai private key Service Account. Pengguna menghubungkan akun Google melalui browser, sedangkan refresh token disimpan lokal pada `.streamlit/google_drive_token.json` dan diabaikan Git.
+Upload file menggunakan Apps Script Web App yang berjalan sebagai pemilik script.
+Streamlit tidak memakai Service Account, private key, atau OAuth pengguna. Gateway
+memvalidasi HMAC-SHA256, timestamp, nonce, SHA-256 file, ekstensi, folder, dan ukuran
+sebelum menyimpan file ke Drive. Petunjuk deployment tersedia di
+`apps_script/README.md`.
 
 Folder penyimpanan proyek ini menggunakan ID `1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i`. Isi konfigurasi berikut; aplikasi juga dapat menormalisasi URL folder lengkap menjadi ID tersebut:
 
 ```toml
 [google_drive]
 folder_id = "1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i"
+web_app_url = "https://script.google.com/macros/s/DEPLOYMENT_ID/exec"
+shared_secret = "TOKEN_ACAK_YANG_SAMA_DENGAN_SCRIPT_PROPERTIES"
 ```
 
-```toml
-[google_oauth]
-project_id = "PROJECT_ID_DARI_JSON"
-client_id = "CLIENT_ID_DARI_JSON"
-client_secret = "CLIENT_SECRET_DARI_JSON"
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-redirect_uris = ["http://localhost"]
-```
-
-Klik **Hubungkan Google Drive** pada aplikasi dan selesaikan login di browser. Jangan commit `.streamlit/secrets.toml` atau `.streamlit/google_drive_token.json`.
+Jangan commit `.streamlit/secrets.toml` atau membagikan shared secret.
 
 ## Catatan validasi
 

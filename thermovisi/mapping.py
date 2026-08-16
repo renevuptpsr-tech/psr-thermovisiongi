@@ -4,6 +4,28 @@ from collections.abc import Iterable
 from typing import Any
 
 
+SINGLE_SHEET_MODE = "SINGLE_SHEET"
+TRAFO_TWO_SHEET_MODE = "TRAFO_TWO_SHEET"
+
+
+def mapping_mode_from_template(
+    template_meta: dict[str, Any] | None,
+    template_items: Iterable[dict[str, Any]],
+) -> str:
+    """Tentukan kebutuhan sheet dari template, tanpa bergantung pada nama sheet Excel."""
+    meta = template_meta or {}
+    identity = " ".join(
+        str(meta.get(key) or "")
+        for key in ("template_code", "template_name", "description")
+    ).upper()
+    sections = {
+        str(item.get("form_section_code") or "").strip().upper()
+        for item in template_items
+    }
+    is_trafo = "TRAFO" in identity or "IBT" in identity or {"A", "B"}.issubset(sections)
+    return TRAFO_TWO_SHEET_MODE if is_trafo else SINGLE_SHEET_MODE
+
+
 def sheet_mapping_from_bays(
     rows: Iterable[dict[str, Any]],
     *,

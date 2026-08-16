@@ -108,7 +108,8 @@ def prepare_inspection_groups(
     executor: str | None,
     notes: str | None,
     user_id: str,
-    plan_item_by_bay: dict[str, str] | None = None,
+    work_type: str = "ROUTINE",
+    stage_code: str = "TAHAP_1",
 ) -> list[dict[str, Any]]:
     """Satu Bay menjadi satu inspeksi dengan satu atau beberapa sheet sumber."""
     parsed_by_name = {sheet.sheet_name: sheet for sheet in parsed_sheets}
@@ -152,9 +153,8 @@ def prepare_inspection_groups(
             notes=notes,
             user_id=user_id,
         )
-        plan_item_id = (plan_item_by_bay or {}).get(bay_id)
-        if plan_item_id:
-            inspection["plan_item_id"] = plan_item_id
+        inspection["work_type"] = work_type
+        inspection["stage_code"] = stage_code
         groups.append(
             {
                 "bay_id": bay_id,

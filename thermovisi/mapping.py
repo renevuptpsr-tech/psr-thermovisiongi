@@ -48,7 +48,7 @@ def sheet_mapping_from_bays(
         if bay_id not in expected or not sheet_name:
             continue
         if sheet_name not in valid_sheets:
-            errors.append(f"Sheet '{sheet_name}' tidak ditemukan dalam hasil validasi Excel.")
+            errors.append(f"Sheet '{sheet_name}' tidak ditemukan di dalam workbook Excel.")
             continue
         if bay_id in bay_to_sheet:
             errors.append(f"Bay {bay_id} muncul lebih dari satu kali pada pemetaan.")
@@ -100,7 +100,7 @@ def trafo_sheet_mapping_from_bays(
             if not sheet_name:
                 continue
             if sheet_name not in valid_sheets:
-                errors.append(f"Sheet '{sheet_name}' tidak ditemukan dalam hasil validasi Excel.")
+                errors.append(f"Sheet '{sheet_name}' tidak ditemukan di dalam workbook Excel.")
                 continue
             if sheet_name in assignments:
                 previous = assignments[sheet_name]

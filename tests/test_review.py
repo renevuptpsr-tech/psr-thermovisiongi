@@ -247,3 +247,20 @@ def test_invalid_compact_review_row_is_colored_red():
     assert "#FEE2E2" in styles[row.index.get_loc("Pengukuran")]
     assert "#FEE2E2" in styles[row.index.get_loc("Status Data")]
     assert styles[row.index.get_loc("Peralatan")] == ""
+
+
+def test_not_measured_review_row_has_no_ahi_and_is_colored_blue():
+    import pandas as pd
+
+    row = pd.Series(
+        {
+            "No.": 1, "Peralatan": "LA", "Titik yang diperiksa": "Body Atas",
+            "Pengukuran": "—", "Delta T": "—", "Kondisi": "—",
+            "AHI Thermovisi": "Tidak diukur",
+            "Kesimpulan / Rekomendasi": "Pengukuran tidak dilakukan",
+            "Status Data": "NOT_MEASURED",
+        }
+    )
+    styles = compact_review_row_style(row)
+    assert "#E0F2FE" in styles[row.index.get_loc("Pengukuran")]
+    assert "#E0F2FE" in styles[row.index.get_loc("Status Data")]

@@ -226,7 +226,7 @@ def test_compact_review_uses_one_measurement_column_for_phase_and_single_values(
     assert set(compact[0]) == {
         "No.", "Peralatan", "Titik yang diperiksa", "Pengukuran",
         "Delta T", "Kondisi", "AHI Thermovisi",
-        "Kesimpulan / Rekomendasi", "Status Data",
+        "Kesimpulan / Rekomendasi", "Status Analisa", "Status Data",
     }
 
 

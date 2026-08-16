@@ -36,7 +36,7 @@ def render_upload_monitoring_page(
     )
     today = date.today()
     with st.container(border=True):
-        c1, c2, c3, c4, c5 = st.columns([1, 1.3, 2, 1.4, 1.3])
+        c1, c2, c3, c4 = st.columns([1, 1.3, 2, 1.3])
         with c1:
             year = int(st.number_input("Tahun", 2020, 2100, today.year, 1))
         with c2:
@@ -52,16 +52,12 @@ def render_upload_monitoring_page(
         with c3:
             ultg_label = st.selectbox("ULTG", list(ultg_options), key="monitor_ultg")
         ultg_flc = ultg_options[ultg_label]
+        work_type = "ROUTINE"
         with c4:
-            work_type = st.selectbox(
-                "Jenis pekerjaan", ["ROUTINE", "FOLLOW_UP", "URGENT"],
-                key="monitor_work_type",
-            )
-        with c5:
             stage_code = st.selectbox(
                 "Tahap",
-                ["TAHAP_1", "TAHAP_2"] if work_type == "ROUTINE" else ["ADHOC"],
-                key=f"monitor_stage_{work_type}",
+                ["TAHAP_1", "TAHAP_2"],
+                key="monitor_routine_stage",
             )
 
     period_start = date(year, month, 1)
@@ -124,6 +120,6 @@ def render_upload_monitoring_page(
         st.dataframe(detail[visible], hide_index=True, width="stretch")
 
     st.caption(
-        f"Periode {MONTH_NAMES[month]} {year} · {work_type} · {stage_code} · "
+        f"Periode {MONTH_NAMES[month]} {year} · ROUTINE · {stage_code} · "
         f"{calendar.monthrange(year, month)[1]} hari kalender"
     )

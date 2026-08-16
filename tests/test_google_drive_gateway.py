@@ -29,6 +29,9 @@ def test_upload_envelope_has_matching_hash_and_signature():
         filename="hasil.xlsx",
         mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         folder_id=FOLDER_ID,
+        destination_year=2026,
+        destination_gi="GI 150KV PORSEA",
+        destination_month=8,
         shared_secret=SECRET,
         timestamp=1_700_000_000,
         nonce="0123456789abcdef0123456789abcdef",
@@ -41,6 +44,9 @@ def test_upload_envelope_has_matching_hash_and_signature():
             envelope["filename"],
             envelope["mime_type"],
             envelope["folder_id"],
+            "2026",
+            "GI 150KV PORSEA",
+            "08 - AGUSTUS",
             expected_hash,
         )
     )
@@ -50,6 +56,9 @@ def test_upload_envelope_has_matching_hash_and_signature():
     assert envelope["file_sha256"] == expected_hash
     assert envelope["signature"] == expected_signature
     assert envelope["file_base64"] == "ZXhjZWwtZGF0YQ=="
+    assert envelope["destination_year"] == "2026"
+    assert envelope["destination_gi"] == "GI 150KV PORSEA"
+    assert envelope["destination_month"] == "08 - AGUSTUS"
 
 
 def test_drive_folder_accepts_id_or_full_url():

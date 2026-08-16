@@ -48,7 +48,7 @@ def _apply_results(row: dict[str, Any], results: list[RuleResult]) -> None:
     row["Tingkat perhatian"] = governing.severity
     ahi = ahi_from_severity(
         governing.severity,
-        evaluable=str(row.get("Status data") or "").upper() != "INVALID",
+        evaluable=str(row.get("Status data") or "").upper() in {"VALID", "WARNING"},
     )
     row["AHI Thermovisi"] = ahi.score if ahi else None
     row["Kategori AHI"] = ahi.label if ahi else None
@@ -103,9 +103,16 @@ def build_sheet_review(
         phase_t = temperatures.get("T")
         single = temperatures.get("VALUE")
         data_statuses = {measurement.data_quality_status for measurement in measurements}
-        status = (
-            "INVALID" if "INVALID" in data_statuses else "WARNING" if "WARNING" in data_statuses else "VALID"
-        )
+        if "INVALID" in data_statuses:
+            status = "INVALID"
+        elif "NOT_MEASURED" in data_statuses:
+            status = "NOT_MEASURED"
+        elif "NOT_APPLICABLE" in data_statuses:
+            status = "NOT_APPLICABLE"
+        elif "WARNING" in data_statuses:
+            status = "WARNING"
+        else:
+            status = "VALID"
         role = str(item.get("comparison_role") or "").upper()
         method = "REFERENSI PASANGAN" if role == "CONDUCTOR" else ""
 
@@ -386,6 +393,10 @@ def compact_review_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ahi_display = f"{int(ahi_score)} — {ahi_label}"
         elif data_status.upper() == "INVALID":
             ahi_display = "Tidak dapat dievaluasi"
+        elif data_status.upper() == "NOT_MEASURED":
+            ahi_display = "Tidak diukur"
+        elif data_status.upper() == "NOT_APPLICABLE":
+            ahi_display = "Tidak berlaku"
         else:
             ahi_display = "—"
         compact.append(
@@ -417,6 +428,10 @@ def compact_review_row_style(row) -> list[str]:
         css = "background-color: #FEE2E2; color: #991B1B; font-weight: 600"
     elif status == "WARNING":
         css = "background-color: #FEF3C7; color: #92400E"
+    elif status == "NOT_MEASURED":
+        css = "background-color: #E0F2FE; color: #075985"
+    elif status == "NOT_APPLICABLE":
+        css = "background-color: #F3F4F6; color: #4B5563"
     else:
         return styles
     for index, column in enumerate(row.index):

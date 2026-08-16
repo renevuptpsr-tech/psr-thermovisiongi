@@ -780,6 +780,14 @@ with st.container(border=True):
                     folder_id=drive_folder_id,
                     drive_web_app_url=drive_web_app_url,
                     drive_shared_secret=drive_shared_secret,
+                    drive_gi_name=next(
+                        (
+                            str(row.get("gi_name") or gi_flc)
+                            for row in gi_rows
+                            if row.get("gi_flc") == gi_flc
+                        ),
+                        str(gi_flc),
+                    ),
                     template_code=template_code,
                     parsed_sheets=mapped_parsed,
                     sheet_assignments=sheet_assignments,

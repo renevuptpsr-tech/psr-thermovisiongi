@@ -9,8 +9,8 @@ from supabase import Client, create_client
 
 from .excel_parser import ParsedSheet
 from .google_drive import upload_excel
-from .inspection import build_inspection_row
 from .retry import retry_read
+from .storage_model import prepare_inspection_groups
 
 
 def make_client(url: str, publishable_key: str, access_token: str | None = None, refresh_token: str | None = None) -> Client:
@@ -135,7 +135,7 @@ def save_import(
     service_account_info: dict[str, Any],
     template_code: str,
     parsed_sheets: list[ParsedSheet],
-    sheet_to_bay: dict[str, str],
+    sheet_assignments: dict[str, dict[str, str]],
     metadata_by_bay: dict[str, dict[str, Any]],
     executor: str | None,
     notes: str | None,
@@ -147,24 +147,16 @@ def save_import(
         raise ValueError(f"File sudah pernah diunggah (status {duplicate['processing_status']}, upload_id {duplicate['upload_id']}).")
 
     upload_id = str(uuid.uuid4())
-    prepared_inspections: list[tuple[ParsedSheet, dict[str, Any], float]] = []
-    for parsed in parsed_sheets:
-        target_bay = sheet_to_bay[parsed.sheet_name]
-        if target_bay not in metadata_by_bay:
-            raise ValueError(f"Metadata untuk Bay {target_bay} belum tersedia.")
-        metadata = metadata_by_bay[target_bay]
-        inspection = build_inspection_row(
-            inspection_id=str(uuid.uuid4()),
-            upload_id=upload_id,
-            target_functloc_id=target_bay,
-            source_sheet_name=parsed.sheet_name,
-            template_code=template_code,
-            metadata=metadata,
-            executor=executor,
-            notes=notes,
-            user_id=user_id,
-        )
-        prepared_inspections.append((parsed, inspection, float(metadata["ambient_temperature_c"])))
+    prepared_inspections = prepare_inspection_groups(
+        upload_id=upload_id,
+        template_code=template_code,
+        parsed_sheets=parsed_sheets,
+        sheet_assignments=sheet_assignments,
+        metadata_by_bay=metadata_by_bay,
+        executor=executor,
+        notes=notes,
+        user_id=user_id,
+    )
 
     drive = upload_excel(file_bytes, filename, mime_type, folder_id, service_account_info)
     upload_row = {
@@ -186,30 +178,48 @@ def save_import(
 
     try:
         total_measurements = 0
-        for parsed, inspection, ambient_c in prepared_inspections:
+        for prepared in prepared_inspections:
+            inspection = prepared["inspection"]
+            ambient_c = prepared["ambient_temperature_c"]
             inspection_id = inspection["inspection_id"]
             client.table("trx_thermovisi_inspection").insert(inspection).execute()
-
-            rows = []
-            for measurement in parsed.measurements:
-                if measurement.temperature_c is None:
-                    continue
-                rows.append({
+            for sheet in prepared["sheets"]:
+                parsed = sheet["parsed"]
+                inspection_sheet_id = str(uuid.uuid4())
+                client.table("trx_thermovisi_inspection_sheet").insert({
+                    "inspection_sheet_id": inspection_sheet_id,
                     "inspection_id": inspection_id,
-                    "template_item_id": measurement.template_item_id,
-                    "point_code": measurement.point_code,
-                    "equipment_group_code": measurement.equipment_group_code,
-                    "phase_code": measurement.phase_code,
-                    "temperature_c": measurement.temperature_c,
-                    "source_cell_address": measurement.source_cell_address,
-                    "source_value_raw": measurement.source_value_raw,
-                    "delta_ambient_c": round(measurement.temperature_c - ambient_c, 3),
-                    "data_quality_status": measurement.data_quality_status,
-                    "validation_message": measurement.validation_message,
-                })
-            for batch in _chunks(rows):
-                client.table("trx_thermovisi_measurement").insert(batch).execute()
-            total_measurements += len(rows)
+                    "sheet_role_code": sheet["sheet_role_code"],
+                    "source_sheet_name": parsed.sheet_name,
+                    "form_section_code": sheet["form_section_code"],
+                    "numeric_count": parsed.numeric_count,
+                    "invalid_count": parsed.invalid_count,
+                    "warning_count": parsed.warning_count,
+                    "not_measured_count": parsed.not_measured_count,
+                    "not_applicable_count": parsed.not_applicable_count,
+                }).execute()
+
+                rows = []
+                for measurement in parsed.measurements:
+                    if measurement.temperature_c is None:
+                        continue
+                    rows.append({
+                        "inspection_id": inspection_id,
+                        "inspection_sheet_id": inspection_sheet_id,
+                        "template_item_id": measurement.template_item_id,
+                        "point_code": measurement.point_code,
+                        "equipment_group_code": measurement.equipment_group_code,
+                        "phase_code": measurement.phase_code,
+                        "temperature_c": measurement.temperature_c,
+                        "source_cell_address": measurement.source_cell_address,
+                        "source_value_raw": measurement.source_value_raw,
+                        "delta_ambient_c": round(measurement.temperature_c - ambient_c, 3),
+                        "data_quality_status": measurement.data_quality_status,
+                        "validation_message": measurement.validation_message,
+                    })
+                for batch in _chunks(rows):
+                    client.table("trx_thermovisi_measurement").insert(batch).execute()
+                total_measurements += len(rows)
 
         client.table("trx_thermovisi_upload").update({
             "processing_status": "COMPLETED",

@@ -15,8 +15,12 @@ from thermovisi.mapping import (
     sheet_mapping_from_bays,
     trafo_sheet_mapping_from_bays,
 )
-from thermovisi.google_credentials import normalize_service_account_info
-from thermovisi.google_drive import normalize_drive_folder_id
+from thermovisi.google_drive import (
+    disconnect_drive,
+    load_drive_credentials,
+    normalize_drive_folder_id,
+    normalize_oauth_client_config,
+)
 from thermovisi.review import build_sheet_review, compact_review_rows, style_compact_review
 from thermovisi.review_validator import validate_bay_review, validation_summary_row
 from thermovisi.supabase_service import (
@@ -739,19 +743,42 @@ with st.container(border=True):
     drive_folder_id = normalize_drive_folder_id(
         str(drive_info.get("folder_id", "")) if drive_info else ""
     )
-    service_account_raw = dict(st.secrets.get("google_service_account", {}))
-    service_account: dict[str, Any] = {}
-    service_account_error: str | None = None
+    oauth_raw = dict(st.secrets.get("google_oauth", {}))
+    oauth_config: dict[str, Any] = {}
+    drive_credentials = None
+    oauth_error: str | None = None
     try:
-        service_account = normalize_service_account_info(service_account_raw)
-    except ValueError as exc:
-        service_account_error = str(exc)
+        oauth_config = normalize_oauth_client_config(oauth_raw)
+        drive_credentials = load_drive_credentials(oauth_config)
+    except Exception as exc:
+        oauth_error = str(exc)
     if total_invalid:
         st.error("Penyimpanan diblokir karena masih ada data INVALID. Perbaiki Excel atau template lalu validasi ulang.")
-    if service_account_error:
-        st.error(service_account_error)
+    if oauth_error:
+        st.error(f"Konfigurasi OAuth Google Drive tidak valid: {oauth_error}")
     if not drive_folder_id:
         st.warning("google_drive.folder_id belum dikonfigurasi pada secrets.toml.")
+    if oauth_config and not oauth_error:
+        if drive_credentials:
+            drive_col_1, drive_col_2 = st.columns([3, 1])
+            with drive_col_1:
+                st.success("Google Drive sudah terhubung.")
+            with drive_col_2:
+                if st.button("Putuskan Drive", width="stretch"):
+                    disconnect_drive()
+                    st.rerun()
+        else:
+            st.info(
+                "Google Drive belum terhubung. Login dilakukan melalui browser "
+                "dan token disimpan hanya di komputer ini."
+            )
+            if st.button("Hubungkan Google Drive", type="secondary", width="stretch"):
+                try:
+                    with st.spinner("Menunggu login dan persetujuan Google..."):
+                        load_drive_credentials(oauth_config, interactive=True)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Google Drive tidak dapat dihubungkan: {exc}")
 
     ready = (
         mapping_complete
@@ -759,8 +786,8 @@ with st.container(border=True):
         and review_confirmed
         and not metadata_errors
         and total_invalid == 0
-        and bool(service_account)
-        and not service_account_error
+        and bool(drive_credentials)
+        and not oauth_error
         and bool(drive_folder_id)
         and bool(template_meta)
     )
@@ -774,7 +801,7 @@ with st.container(border=True):
                     mime_type=uploaded.type
                     or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     folder_id=drive_folder_id,
-                    service_account_info=service_account,
+                    drive_credentials=drive_credentials,
                     template_code=template_code,
                     parsed_sheets=mapped_parsed,
                     sheet_assignments=sheet_assignments,

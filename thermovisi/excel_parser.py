@@ -156,6 +156,10 @@ def parse_workbook(
     file_bytes: bytes,
     template_items: list[dict[str, Any]],
     ambient_temperature_c: float | None = None,
+    *,
+    include_unmatched_sheets: bool = False,
+    forced_section_by_sheet: dict[str, str] | None = None,
+    selected_sheet_names: set[str] | None = None,
 ) -> tuple[list[ParsedSheet], list[str]]:
     if not template_items:
         raise ValueError("Template tidak mempunyai item aktif.")
@@ -163,14 +167,37 @@ def parse_workbook(
     workbook = load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=False)
     warnings: list[str] = []
     result: list[ParsedSheet] = []
+    forced_sections = forced_section_by_sheet or {}
 
     for sheet_name in workbook.sheetnames:
+        if selected_sheet_names is not None and sheet_name not in selected_sheet_names:
+            continue
         ws = workbook[sheet_name]
-        selected_items, label_rows, selection_warning = _items_for_sheet(ws, template_items)
+        forced_section = str(forced_sections.get(sheet_name) or "").strip().upper()
+        if forced_section:
+            label_rows = _sheet_label_rows(ws)
+            selected_items = [
+                item
+                for item in template_items
+                if str(item.get("form_section_code") or "MAIN").strip().upper()
+                == forced_section
+            ]
+            selection_warning = None
+        else:
+            selected_items, label_rows, selection_warning = _items_for_sheet(ws, template_items)
         if selection_warning:
-            warnings.append(f"Sheet '{sheet_name}' dilewati: {selection_warning}.")
+            warnings.append(f"Sheet '{sheet_name}': {selection_warning}.")
+            if include_unmatched_sheets:
+                result.append(ParsedSheet(sheet_name, [], 0, 0, 0))
             continue
         if not selected_items:
+            if forced_section:
+                warnings.append(
+                    f"Sheet '{sheet_name}' dipilih sebagai bagian {forced_section}, "
+                    "tetapi template tidak memiliki item untuk bagian tersebut."
+                )
+            if include_unmatched_sheets:
+                result.append(ParsedSheet(sheet_name, [], 0, 0, 0))
             continue
         measurements: list[ParsedMeasurement] = []
         for item in selected_items:
@@ -226,11 +253,18 @@ def parse_workbook(
         not_applicable_count = sum(
             m.data_quality_status == "NOT_APPLICABLE" for m in measurements
         )
-        if numeric_count == 0 and not_measured_count == 0 and not_applicable_count == 0:
+        if (
+            numeric_count == 0
+            and not_measured_count == 0
+            and not_applicable_count == 0
+            and not forced_section
+        ):
             warnings.append(
                 f"Sheet '{sheet_name}' dikenali dari label titik ukur tetapi tidak berisi nilai angka; "
                 "sheet dilewati."
             )
+            if include_unmatched_sheets:
+                result.append(ParsedSheet(sheet_name, [], 0, 0, 0))
             continue
         result.append(
             ParsedSheet(
@@ -244,7 +278,7 @@ def parse_workbook(
             )
         )
 
-    if not result:
+    if not result and not include_unmatched_sheets:
         warnings.append(
             "Tidak ada sheet yang isi titik ukurnya cocok dengan template yang dipilih. "
             "Nama sheet tidak digunakan sebagai syarat."

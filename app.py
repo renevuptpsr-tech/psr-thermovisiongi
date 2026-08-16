@@ -15,6 +15,8 @@ from thermovisi.mapping import (
     sheet_mapping_from_bays,
     trafo_sheet_mapping_from_bays,
 )
+from thermovisi.google_credentials import normalize_service_account_info
+from thermovisi.google_drive import normalize_drive_folder_id
 from thermovisi.review import build_sheet_review, compact_review_rows, style_compact_review
 from thermovisi.review_validator import validate_bay_review, validation_summary_row
 from thermovisi.supabase_service import (
@@ -734,12 +736,22 @@ with st.container(border=True):
         notes = st.text_input("Catatan (opsional)", placeholder="Catatan umum untuk file ini")
 
     drive_info = st.secrets.get("google_drive", {})
-    drive_folder_id = str(drive_info.get("folder_id", "")) if drive_info else ""
-    service_account = dict(st.secrets.get("google_service_account", {}))
+    drive_folder_id = normalize_drive_folder_id(
+        str(drive_info.get("folder_id", "")) if drive_info else ""
+    )
+    service_account_raw = dict(st.secrets.get("google_service_account", {}))
+    service_account: dict[str, Any] = {}
+    service_account_error: str | None = None
+    try:
+        service_account = normalize_service_account_info(service_account_raw)
+    except ValueError as exc:
+        service_account_error = str(exc)
     if total_invalid:
         st.error("Penyimpanan diblokir karena masih ada data INVALID. Perbaiki Excel atau template lalu validasi ulang.")
-    if not service_account or not drive_folder_id:
-        st.warning("Konfigurasi Google Drive belum lengkap pada secrets.toml.")
+    if service_account_error:
+        st.error(service_account_error)
+    if not drive_folder_id:
+        st.warning("google_drive.folder_id belum dikonfigurasi pada secrets.toml.")
 
     ready = (
         mapping_complete
@@ -748,6 +760,7 @@ with st.container(border=True):
         and not metadata_errors
         and total_invalid == 0
         and bool(service_account)
+        and not service_account_error
         and bool(drive_folder_id)
         and bool(template_meta)
     )

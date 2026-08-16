@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+from .rules_neta import classify_over_ambient_delta, classify_similar_component_delta
+
 
 RULE_SET_CODE = "THERMOVISI_PMT_V1"
 
@@ -39,32 +41,6 @@ def _validate_temperatures(phase_temperatures_c: Mapping[str, float]) -> list[fl
     return values
 
 
-def _similar_component_condition(delta_c: float) -> tuple[str, str, int]:
-    """Klasifikasi ΔT antar-komponen serupa berdasarkan FLIR/NETA."""
-    if delta_c < 0:
-        raise ValueError("Delta suhu tidak boleh negatif.")
-    if delta_c < 1:
-        return "Normal", "Lanjutkan inspeksi rutin.", 0
-    if delta_c < 4:
-        return "Kondisi I", "Dimungkinkan ada ketidaknormalan; lakukan investigasi lanjutan.", 1
-    if delta_c <= 15:
-        return "Kondisi II", "Mengindikasikan adanya defisiensi; jadwalkan perbaikan.", 2
-    return "Kondisi III", "Ketidaknormalan mayor; lakukan perbaikan segera.", 4
-
-
-def _ambient_condition(delta_c: float) -> tuple[str, str, int]:
-    """Klasifikasi ΔT terhadap ambient berdasarkan NETA MTS-1997."""
-    if delta_c < 1:
-        return "Normal", "Lanjutkan inspeksi rutin.", 0
-    if delta_c < 11:
-        return "Kondisi I", "Dimungkinkan ada ketidaknormalan; lakukan investigasi lanjutan.", 1
-    if delta_c < 21:
-        return "Kondisi II", "Mengindikasikan adanya defisiensi; jadwalkan perbaikan.", 2
-    if delta_c <= 40:
-        return "Kondisi III", "Lakukan monitoring kontinu sampai dilakukan perbaikan.", 3
-    return "Kondisi IV", "Ketidaknormalan mayor; lakukan perbaikan segera.", 4
-
-
 def evaluate_pmt_clamp_delta(
     clamp_temperature_c: float,
     reference_temperature_c: float,
@@ -76,7 +52,8 @@ def evaluate_pmt_clamp_delta(
     if role not in {"CONDUCTOR", "MAIN_TERMINAL"}:
         raise ValueError("reference_role harus CONDUCTOR atau MAIN_TERMINAL.")
     delta_c = abs(float(clamp_temperature_c) - float(reference_temperature_c))
-    condition, _, severity = _similar_component_condition(delta_c)
+    classification = classify_similar_component_delta(delta_c)
+    condition, severity = classification.condition, classification.severity
     if condition == "Normal":
         recommendation = "Lanjutkan pengujian rutin tiga bulanan."
     elif condition == "Kondisi I":
@@ -103,7 +80,8 @@ def evaluate_grading_capacitor(
     """Evaluasi perbedaan suhu antar-fasa grading kapasitor."""
     values = _validate_temperatures(phase_temperatures_c)
     delta_c = max(values) - min(values)
-    condition, _, severity = _similar_component_condition(delta_c)
+    classification = classify_similar_component_delta(delta_c)
+    condition, severity = classification.condition, classification.severity
     if condition == "Normal":
         recommendation = "Tidak ditemukan perbedaan suhu antar-fasa yang signifikan."
     else:
@@ -127,8 +105,14 @@ def evaluate_interrupter_chamber(
     values = _validate_temperatures(phase_temperatures_c)
     delta_interphase = max(values) - min(values)
     delta_ambient = max(values) - float(ambient_temperature_c)
-    inter_condition, inter_recommendation, inter_severity = _similar_component_condition(delta_interphase)
-    ambient_condition, ambient_recommendation, ambient_severity = _ambient_condition(delta_ambient)
+    interphase = classify_similar_component_delta(delta_interphase)
+    ambient = classify_over_ambient_delta(delta_ambient)
+    inter_condition, inter_recommendation, inter_severity = (
+        interphase.condition, interphase.recommendation, interphase.severity
+    )
+    ambient_condition, ambient_recommendation, ambient_severity = (
+        ambient.condition, ambient.recommendation, ambient.severity
+    )
 
     if ambient_severity > inter_severity:
         condition = ambient_condition

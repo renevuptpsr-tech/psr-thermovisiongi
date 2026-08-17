@@ -64,3 +64,145 @@ def test_preview_uses_ambient_for_each_sheet():
     sheets, _ = parse_workbook(workbook_bytes(), items)
     rows = preview_rows(sheets, {"BAY1": 35.0})
     assert [row["delta_ambient_c"] for row in rows] == [5.0, 6.5, 7.0]
+
+
+def test_sheet_name_does_not_have_to_match_template_pattern():
+    items = [{
+        "template_item_id": 1, "form_section_code": "MAIN", "sequence_no": 1,
+        "source_sheet_pattern": r"^NAMA_LAMA_YANG_TIDAK_COCOK$", "source_row_no": 15,
+        "source_occurrence_no": 1, "raw_point_label": "Titik A",
+        "equipment_group_code": "PMT", "point_code": "POINT_A",
+        "measurement_mode_code": "PHASE", "phase_codes": ["R", "S", "T"],
+        "source_value_map": {"R": "J", "S": "K", "T": "L"}, "is_required": True,
+    }]
+
+    sheets, warnings = parse_workbook(workbook_bytes(), items, 30.0)
+
+    assert warnings == []
+    assert [sheet.sheet_name for sheet in sheets] == ["BAY1"]
+    assert sheets[0].numeric_count == 3
+
+
+def test_form_section_is_detected_from_labels_not_sheet_name():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Nama Bebas Unit Toba"
+    ws["B10"] = "Titik Trafo"
+    ws["E10"] = 45
+    buffer = BytesIO()
+    wb.save(buffer)
+    common = {
+        "source_sheet_pattern": r"TIDAK_DIPAKAI", "source_row_no": None,
+        "source_occurrence_no": 1, "equipment_group_code": "TRF",
+        "measurement_mode_code": "SINGLE", "phase_codes": [],
+        "source_value_map": {"VALUE": "E"}, "is_required": True,
+    }
+    items = [
+        dict(common, template_item_id=1, form_section_code="A", sequence_no=1,
+             raw_point_label="Titik Trafo", point_code="TRF_POINT"),
+        dict(common, template_item_id=2, form_section_code="B", sequence_no=1,
+             raw_point_label="Titik Bay", point_code="BAY_POINT"),
+    ]
+
+    sheets, warnings = parse_workbook(buffer.getvalue(), items)
+
+    assert warnings == []
+    assert sheets[0].measurements[0].form_section_code == "A"
+    assert sheets[0].measurements[0].temperature_c == 45
+
+
+def test_dash_is_not_measured_and_does_not_make_sheet_invalid():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "BAY TIDAK DIUKUR"
+    ws["B15"] = "Titik A"
+    ws["J15"] = "-"
+    ws["K15"] = "—"
+    ws["L15"] = "TIDAK DIUKUR"
+    buffer = BytesIO()
+    wb.save(buffer)
+    items = [{
+        "template_item_id": 1, "form_section_code": "MAIN", "sequence_no": 1,
+        "source_row_no": 15, "source_occurrence_no": 1, "raw_point_label": "Titik A",
+        "equipment_group_code": "PMT", "point_code": "POINT_A",
+        "measurement_mode_code": "PHASE", "phase_codes": ["R", "S", "T"],
+        "source_value_map": {"R": "J", "S": "K", "T": "L"}, "is_required": True,
+    }]
+
+    sheets, warnings = parse_workbook(buffer.getvalue(), items)
+
+    assert warnings == []
+    assert len(sheets) == 1
+    assert sheets[0].numeric_count == 0
+    assert sheets[0].invalid_count == 0
+    assert sheets[0].not_measured_count == 3
+    assert {m.data_quality_status for m in sheets[0].measurements} == {"NOT_MEASURED"}
+
+
+def test_blank_required_cell_remains_invalid():
+    wb = Workbook()
+    ws = wb.active
+    ws["B15"] = "Titik A"
+    buffer = BytesIO()
+    wb.save(buffer)
+    items = [{
+        "template_item_id": 1, "form_section_code": "MAIN", "sequence_no": 1,
+        "source_row_no": 15, "source_occurrence_no": 1, "raw_point_label": "Titik A",
+        "equipment_group_code": "PMT", "point_code": "POINT_A",
+        "measurement_mode_code": "SINGLE", "phase_codes": [],
+        "source_value_map": {"VALUE": "E"}, "is_required": True,
+    }]
+    sheets, warnings = parse_workbook(buffer.getvalue(), items)
+    assert sheets == []
+    assert any("tidak berisi nilai angka" in warning for warning in warnings)
+
+
+def test_all_workbook_sheets_are_available_before_manual_mapping():
+    wb = Workbook()
+    wb.active.title = "TD 1"
+    wb.create_sheet("TD 2")
+    buffer = BytesIO()
+    wb.save(buffer)
+    items = [{
+        "template_item_id": 1, "form_section_code": "B", "sequence_no": 1,
+        "source_row_no": 10, "source_occurrence_no": 1, "raw_point_label": "Titik Bay",
+        "equipment_group_code": "PMT", "point_code": "POINT_B",
+        "measurement_mode_code": "SINGLE", "phase_codes": [],
+        "source_value_map": {"VALUE": "E"}, "is_required": True,
+    }]
+
+    sheets, _ = parse_workbook(
+        buffer.getvalue(), items, include_unmatched_sheets=True
+    )
+
+    assert [sheet.sheet_name for sheet in sheets] == ["TD 1", "TD 2"]
+
+
+def test_manual_sheet_role_forces_the_selected_template_section():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "TD 2"
+    ws["E10"] = 41.5
+    buffer = BytesIO()
+    wb.save(buffer)
+    common = {
+        "source_row_no": 10, "source_occurrence_no": 1,
+        "equipment_group_code": "PMT", "measurement_mode_code": "SINGLE",
+        "phase_codes": [], "source_value_map": {"VALUE": "E"}, "is_required": True,
+    }
+    items = [
+        dict(common, template_item_id=1, form_section_code="A", sequence_no=1,
+             raw_point_label="Titik Trafo", point_code="POINT_A"),
+        dict(common, template_item_id=2, form_section_code="B", sequence_no=1,
+             raw_point_label="Titik Bay", point_code="POINT_B"),
+    ]
+
+    sheets, _ = parse_workbook(
+        buffer.getvalue(),
+        items,
+        forced_section_by_sheet={"TD 2": "B"},
+        selected_sheet_names={"TD 2"},
+    )
+
+    assert [item.form_section_code for item in sheets[0].measurements] == ["B"]
+    assert sheets[0].measurements[0].temperature_c == 41.5

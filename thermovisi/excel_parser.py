@@ -7,7 +7,6 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
 
 @dataclass(slots=True)
@@ -38,6 +37,8 @@ class ParsedSheet:
     numeric_count: int
     invalid_count: int
     warning_count: int
+    not_measured_count: int = 0
+    not_applicable_count: int = 0
 
 
 def _normalise(value: Any) -> str:
@@ -76,6 +77,47 @@ def _row_for_label(ws, label: str, occurrence: int) -> int | None:
     return None
 
 
+def _sheet_label_rows(ws) -> dict[str, list[int]]:
+    """Indeks label sisi kiri sheet; nama sheet sengaja tidak digunakan."""
+    rows_by_label: dict[str, list[int]] = {}
+    for row in ws.iter_rows(min_col=1, max_col=min(ws.max_column, 9)):
+        for cell in row:
+            label = _normalise(cell.value)
+            if label:
+                rows_by_label.setdefault(label, []).append(cell.row)
+    return rows_by_label
+
+
+def _items_for_sheet(
+    ws,
+    template_items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, list[int]], str | None]:
+    """Pilih bagian template dari label isi sheet, bukan dari nama sheet."""
+    label_rows = _sheet_label_rows(ws)
+    items_by_section: dict[str, list[dict[str, Any]]] = {}
+    for item in template_items:
+        section = str(item.get("form_section_code") or "MAIN")
+        items_by_section.setdefault(section, []).append(item)
+
+    scores = {
+        section: sum(
+            1
+            for item in items
+            if _normalise(item.get("raw_point_label")) in label_rows
+        )
+        for section, items in items_by_section.items()
+    }
+    best_score = max(scores.values(), default=0)
+    if best_score == 0:
+        return [], label_rows, None
+    winners = [section for section, score in scores.items() if score == best_score]
+    if len(winners) > 1:
+        return [], label_rows, (
+            "Isi sheet cocok sama kuat dengan beberapa bagian template: " + ", ".join(winners)
+        )
+    return items_by_section[winners[0]], label_rows, None
+
+
 def _value_spec(value_map: dict[str, Any], key: str) -> tuple[str | None, int]:
     """Mendukung map sederhana {R: J} maupun {R: {column: J, row_offset: 0}}."""
     spec = value_map.get(key)
@@ -87,9 +129,24 @@ def _value_spec(value_map: dict[str, Any], key: str) -> tuple[str | None, int]:
     return None, 0
 
 
-def _quality(number: float | None, required: bool) -> tuple[str, str | None]:
+_NOT_MEASURED_VALUES = {"-", "—", "–", "tidak diukur", "tidak dilakukan pengukuran", "not measured"}
+_NOT_APPLICABLE_VALUES = {"n/a", "na", "tidak ada", "tidak tersedia", "not applicable"}
+
+
+def _quality(raw: Any, number: float | None, required: bool) -> tuple[str, str | None]:
+    raw_text = _normalise(raw)
+    if raw_text in _NOT_MEASURED_VALUES:
+        return "NOT_MEASURED", "Pengukuran tidak dilakukan"
+    if raw_text in _NOT_APPLICABLE_VALUES:
+        return "NOT_APPLICABLE", "Titik ukur tidak tersedia/tidak berlaku"
+    if raw is None or raw_text == "":
+        return (
+            ("INVALID", "Nilai suhu wajib kosong")
+            if required
+            else ("WARNING", "Nilai opsional kosong")
+        )
     if number is None:
-        return ("INVALID", "Nilai suhu wajib tidak ditemukan") if required else ("WARNING", "Nilai opsional kosong")
+        return "INVALID", "Nilai suhu bukan angka yang valid"
     if number < -50 or number > 300:
         return "WARNING", "Nilai suhu di luar rentang operasional wajar (-50 s.d. 300 °C)"
     return "VALID", None
@@ -99,34 +156,58 @@ def parse_workbook(
     file_bytes: bytes,
     template_items: list[dict[str, Any]],
     ambient_temperature_c: float | None = None,
+    *,
+    include_unmatched_sheets: bool = False,
+    forced_section_by_sheet: dict[str, str] | None = None,
+    selected_sheet_names: set[str] | None = None,
 ) -> tuple[list[ParsedSheet], list[str]]:
     if not template_items:
         raise ValueError("Template tidak mempunyai item aktif.")
 
     workbook = load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=False)
-    sheet_patterns: list[str] = []
-    for item in template_items:
-        pattern = item["source_sheet_pattern"]
-        if pattern not in sheet_patterns:
-            sheet_patterns.append(pattern)
-
-    matched = [name for name in workbook.sheetnames if any(re.search(p, name, re.I) for p in sheet_patterns)]
     warnings: list[str] = []
     result: list[ParsedSheet] = []
+    forced_sections = forced_section_by_sheet or {}
 
-    for sheet_name in matched:
+    for sheet_name in workbook.sheetnames:
+        if selected_sheet_names is not None and sheet_name not in selected_sheet_names:
+            continue
         ws = workbook[sheet_name]
-        measurements: list[ParsedMeasurement] = []
-        for item in template_items:
-            if not re.search(item["source_sheet_pattern"], sheet_name, re.I):
-                continue
-            row_no = item.get("source_row_no")
-            if row_no is None:
-                row_no = _row_for_label(
-                    ws,
-                    item.get("raw_point_label", ""),
-                    int(item.get("source_occurrence_no") or 1),
+        forced_section = str(forced_sections.get(sheet_name) or "").strip().upper()
+        if forced_section:
+            label_rows = _sheet_label_rows(ws)
+            selected_items = [
+                item
+                for item in template_items
+                if str(item.get("form_section_code") or "MAIN").strip().upper()
+                == forced_section
+            ]
+            selection_warning = None
+        else:
+            selected_items, label_rows, selection_warning = _items_for_sheet(ws, template_items)
+        if selection_warning:
+            warnings.append(f"Sheet '{sheet_name}': {selection_warning}.")
+            if include_unmatched_sheets:
+                result.append(ParsedSheet(sheet_name, [], 0, 0, 0))
+            continue
+        if not selected_items:
+            if forced_section:
+                warnings.append(
+                    f"Sheet '{sheet_name}' dipilih sebagai bagian {forced_section}, "
+                    "tetapi template tidak memiliki item untuk bagian tersebut."
                 )
+            if include_unmatched_sheets:
+                result.append(ParsedSheet(sheet_name, [], 0, 0, 0))
+            continue
+        measurements: list[ParsedMeasurement] = []
+        for item in selected_items:
+            label = _normalise(item.get("raw_point_label"))
+            occurrence = int(item.get("source_occurrence_no") or 1)
+            matching_rows = label_rows.get(label, [])
+            row_no = matching_rows[occurrence - 1] if len(matching_rows) >= occurrence else None
+            # Fallback hanya setelah bagian form dikenali dari isi sheet.
+            if row_no is None:
+                row_no = item.get("source_row_no")
 
             mode = item["measurement_mode_code"]
             keys = list(item.get("phase_codes") or []) if mode == "PHASE" else ["VALUE"]
@@ -136,7 +217,7 @@ def parse_workbook(
                 address = f"{column}{row_no + row_offset}" if column and row_no else None
                 raw = ws[address].value if address else None
                 temperature = _number(raw)
-                quality, message = _quality(temperature, bool(item.get("is_required", True)))
+                quality, message = _quality(raw, temperature, bool(item.get("is_required", True)))
                 if row_no is None:
                     quality, message = "INVALID", "Baris titik ukur tidak ditemukan"
                 elif column is None:
@@ -166,8 +247,24 @@ def parse_workbook(
                 )
 
         numeric_count = sum(m.temperature_c is not None for m in measurements)
-        if numeric_count == 0:
-            warnings.append(f"Sheet '{sheet_name}' cocok dengan pola template tetapi kosong; sheet dilewati.")
+        not_measured_count = sum(
+            m.data_quality_status == "NOT_MEASURED" for m in measurements
+        )
+        not_applicable_count = sum(
+            m.data_quality_status == "NOT_APPLICABLE" for m in measurements
+        )
+        if (
+            numeric_count == 0
+            and not_measured_count == 0
+            and not_applicable_count == 0
+            and not forced_section
+        ):
+            warnings.append(
+                f"Sheet '{sheet_name}' dikenali dari label titik ukur tetapi tidak berisi nilai angka; "
+                "sheet dilewati."
+            )
+            if include_unmatched_sheets:
+                result.append(ParsedSheet(sheet_name, [], 0, 0, 0))
             continue
         result.append(
             ParsedSheet(
@@ -176,11 +273,16 @@ def parse_workbook(
                 numeric_count=numeric_count,
                 invalid_count=sum(m.data_quality_status == "INVALID" for m in measurements),
                 warning_count=sum(m.data_quality_status == "WARNING" for m in measurements),
+                not_measured_count=not_measured_count,
+                not_applicable_count=not_applicable_count,
             )
         )
 
-    if not matched:
-        warnings.append("Tidak ada nama sheet yang cocok dengan pola template.")
+    if not result and not include_unmatched_sheets:
+        warnings.append(
+            "Tidak ada sheet yang isi titik ukurnya cocok dengan template yang dipilih. "
+            "Nama sheet tidak digunakan sebagai syarat."
+        )
     return result, warnings
 
 

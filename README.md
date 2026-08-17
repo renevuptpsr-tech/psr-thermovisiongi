@@ -6,9 +6,9 @@ Aplikasi Streamlit untuk membaca hasil pengukuran Thermovisi dari Excel, memetak
 
 1. Login menggunakan Supabase Auth.
 2. Pilih ULTG, GI, lalu satu atau beberapa Bay yang akan diproses.
-3. Isi tanggal, waktu, arus pengukuran, arus puncak bulanan, dan suhu lingkungan untuk setiap Bay.
+3. Isi tanggal, waktu, arus pengukuran, arus tertinggi yang pernah dicapai, dan suhu lingkungan untuk setiap Bay.
 4. Pilih template yang otomatis difilter berdasarkan fungsi/tegangan Bay, lalu unggah Excel.
-5. Petakan setiap sheet hanya ke Bay yang dipilih dan periksa hasil validasi.
+5. Untuk setiap Bay Trafo, pilih dua sumber: `Sheet Trafo` (bagian A) dan `Sheet Bay` (bagian B).
 6. Simpan: file ke Google Drive; metadata, inspeksi, dan nilai suhu ke Supabase.
 
 ## Instalasi Windows PowerShell
@@ -64,12 +64,43 @@ Role `authenticated` perlu `SELECT` pada tiga view dropdown dan tabel referensi 
 
 ## Google Drive
 
-Aktifkan Google Drive API, buat service account, lalu bagikan folder tujuan kepada `client_email` service account dengan akses Editor. Salin ID folder dan kredensial JSON ke `.streamlit/secrets.toml` mengikuti contoh. File tidak disimpan di Supabase Storage.
+Upload file menggunakan Apps Script Web App yang berjalan sebagai pemilik script.
+Streamlit tidak memakai Service Account, private key, atau OAuth pengguna. Gateway
+memvalidasi HMAC-SHA256, timestamp, nonce, SHA-256 file, ekstensi, folder, dan ukuran
+sebelum menyimpan file ke Drive. Petunjuk deployment tersedia di
+`apps_script/README.md`.
+
+File disusun otomatis sebagai `TAHUN / NAMA GARDU INDUK / NN - NAMA BULAN / NAMA FILE`
+berdasarkan tanggal pelaksanaan. Seluruh Bay dalam satu workbook harus menggunakan
+bulan dan tahun pelaksanaan yang sama.
+
+Folder penyimpanan proyek ini menggunakan ID `1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i`. Isi konfigurasi berikut; aplikasi juga dapat menormalisasi URL folder lengkap menjadi ID tersebut:
+
+```toml
+[google_drive]
+folder_id = "1mWx5bX5siYp0d63h1VSy0QHsblOXJT6i"
+web_app_url = "https://script.google.com/macros/s/DEPLOYMENT_ID/exec"
+shared_secret = "TOKEN_ACAK_YANG_SAMA_DENGAN_SCRIPT_PROPERTIES"
+```
+
+Jangan commit `.streamlit/secrets.toml` atau membagikan shared secret.
 
 ## Catatan validasi
 
-- Sheet yang cocok pola template tetapi tidak memiliki nilai angka akan dilewati.
+- Nama sheet tidak menjadi syarat. Bagian form dikenali dari label titik ukur di dalam sheet, lalu pengguna memetakan Bay ke sheet yang dipilih.
+- Sheet yang dikenali dari isinya tetapi tidak memiliki nilai angka akan dilewati.
+- Referensi ULTG, GI, Bay, dan template disimpan dalam cache sesi agar tidak dibaca ulang pada setiap perubahan form.
+- Gangguan koneksi sementara seperti Windows `10054` akan dicoba ulang untuk operasi baca yang aman.
+- Pemetaan dimulai dari setiap Bay lalu pengguna memilih sheet Excel tujuan; satu sheet tidak dapat dipakai untuk dua Bay.
+- Nama sheet bebas. Isi `Sheet Trafo` dan `Sheet Bay` divalidasi dari label titik ukurnya agar tidak tertukar.
+- Review memilih satu Bay, lalu menampilkan tab Trafo Utama dan Bay Trafo.
+- Tabel utama menggunakan kolom Pengukuran, Delta T, Kondisi, Kesimpulan/Rekomendasi, dan Status Data; nilai tunggal maupun R/S/T tetap berada dalam satu kolom.
+- Baris data INVALID ditandai merah dan WARNING ditandai kuning; detail teknis tetap tersedia dalam expander.
+- Tombol simpan tetap terkunci sampai seluruh hasil review dikonfirmasi pengguna.
+- Untuk workflow dua sheet Trafo, penyimpanan sementara dikunci sampai model relasi satu inspeksi ke banyak sheet ditetapkan.
 - Nilai wajib kosong menjadi `INVALID` dan memblokir penyimpanan.
 - Nilai di luar -50 sampai 300 °C menjadi `WARNING`.
 - Hanya baris dengan nilai suhu yang dimasukkan ke `trx_thermovisi_measurement`.
 - `delta_ambient_c = temperature_c - ambient_temperature_c` dihitung menggunakan suhu lingkungan Bay tujuan masing-masing.
+- Evaluasi Trafo menggunakan rule set berversi `THERMOVISI_TRAFO_V1`.
+- Pada beban 0 A, evaluasi klem memakai ΔT aktual tanpa koreksi beban dan diberi basis `RAW_DELTA_ZERO_LOAD`.

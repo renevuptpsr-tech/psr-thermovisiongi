@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import os
-import re
 from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from thermovisi.excel_parser import parse_workbook, preview_rows
+from thermovisi.ahi import aggregate_ahi
+from thermovisi.excel_parser import parse_workbook
+from thermovisi.mapping import (
+    TRAFO_TWO_SHEET_MODE,
+    mapping_mode_from_template,
+    sheet_mapping_from_bays,
+    trafo_sheet_mapping_from_bays,
+)
+from thermovisi.monitoring_page import render_upload_monitoring_page
+from thermovisi.google_drive import normalize_drive_folder_id, validate_gateway_config
+from thermovisi.review import build_sheet_review, compact_review_rows, style_compact_review
+from thermovisi.review_validator import validate_bay_review, validation_summary_row
 from thermovisi.supabase_service import (
     fetch_bays,
     fetch_gi,
@@ -29,12 +39,18 @@ st.markdown(
       .block-container {padding-top: 2rem; padding-bottom: 3rem; max-width: 1500px;}
       h1, h2, h3 {letter-spacing: -0.02em;}
       [data-testid="stMetric"] {background: #f5f9fa; border: 1px solid #dbe8eb; padding: 0.8rem 1rem; border-radius: 0.75rem;}
+      section[data-testid="stSidebar"] .stButton > button {
+        min-height: 2.8rem;
+        justify-content: flex-start;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
-st.title("Thermovision Gardu Induk")
-st.caption("Impor hasil pengukuran · validasi Python · penyimpanan terstruktur Supabase")
+st.title("Thermovisi Gardu Induk")
+st.caption("Pengelolaan hasil inspeksi dan monitoring pelaksanaan Thermovisi")
 
 
 def secret(name: str, default: str = "") -> str:
@@ -42,6 +58,9 @@ def secret(name: str, default: str = "") -> str:
 
 
 def authenticated_client():
+    cached_client = st.session_state.get("supabase_client")
+    if cached_client is not None:
+        return cached_client
     auth = st.session_state.get("auth") or {}
     client = make_client(
         secret("SUPABASE_URL"),
@@ -54,16 +73,28 @@ def authenticated_client():
         st.session_state.auth.update(
             {"access_token": session.access_token, "refresh_token": session.refresh_token}
         )
+    st.session_state.supabase_client = client
     return client
+
+
+def stop_for_reference_error(error: Exception) -> None:
+    st.error(f"Koneksi ke Supabase terputus saat membaca referensi: {error}")
+    st.caption(
+        "Proyek Supabase terdeteksi aktif. Gangguan ini biasanya bersifat sementara atau berasal dari jaringan/proxy lokal."
+    )
+    if st.button("Coba baca ulang", type="primary"):
+        st.session_state.supabase_client = None
+        st.session_state.reference_cache = {
+            "gi": {}, "bays": {}, "template_items": {}
+        }
+        st.rerun()
+    st.stop()
 
 
 def bay_label(row: dict[str, Any]) -> str:
     short_name = (row.get("bay_short_name") or row.get("bay_name") or "Bay").strip()
-    return f"{short_name} — {row['bay_flc']}"
-
-
-def normalise_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.casefold())
+    optional = " · Opsional" if row.get("monitoring_category") == "OPTIONAL" else ""
+    return f"{short_name}{optional} — {row['bay_flc']}"
 
 
 def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]], list[str]]:
@@ -76,7 +107,7 @@ def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]]
             "Tanggal pelaksanaan",
             "Pukul pelaksanaan",
             "Beban pengukuran (A)",
-            "Beban tertinggi bulan (A)",
+            "Beban tertinggi pernah dicapai (A)",
             "Suhu lingkungan (°C)",
         ]
         if any(pd.isna(row[field]) for field in required):
@@ -84,14 +115,14 @@ def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]]
             continue
         try:
             current_a = float(row["Beban pengukuran (A)"])
-            peak_a = float(row["Beban tertinggi bulan (A)"])
+            peak_a = float(row["Beban tertinggi pernah dicapai (A)"])
             ambient_c = float(row["Suhu lingkungan (°C)"])
         except (TypeError, ValueError):
             errors.append(f"Beban atau suhu {name} bukan angka yang valid.")
             continue
-        if current_a <= 0 or peak_a <= 0:
-            errors.append(f"Beban {name} harus lebih besar dari 0 A.")
-        if peak_a < current_a:
+        if current_a < 0 or peak_a < 0:
+            errors.append(f"Beban {name} tidak boleh negatif.")
+        if current_a > 0 and peak_a < current_a:
             errors.append(f"Beban tertinggi {name} lebih kecil dari beban pengukuran.")
         if not -50 <= ambient_c <= 100:
             errors.append(f"Suhu lingkungan {name} harus berada pada -50 sampai 100 °C.")
@@ -105,26 +136,17 @@ def metadata_from_editor(frame: pd.DataFrame) -> tuple[dict[str, dict[str, Any]]
     return result, errors
 
 
-def suggested_bay_label(sheet_name: str, selected_rows: list[dict[str, Any]]) -> str | None:
-    if len(selected_rows) == 1:
-        return bay_label(selected_rows[0])
-    sheet_key = normalise_key(sheet_name)
-    for row in selected_rows:
-        candidates = [row["bay_flc"], row.get("bay_short_name") or "", row.get("bay_name") or ""]
-        for candidate in candidates:
-            candidate_key = normalise_key(candidate)
-            if candidate_key and (candidate_key in sheet_key or sheet_key in candidate_key):
-                return bay_label(row)
-    return None
-
-
 for key, value in {
     "auth": None,
+    "supabase_client": None,
+    "reference_cache": {"gi": {}, "bays": {}, "template_items": {}},
     "parsed": None,
     "parse_warnings": [],
     "parse_signature": None,
+    "review_validation_signature": None,
 }.items():
     st.session_state.setdefault(key, value)
+st.session_state.setdefault("active_page", "IMPORT DATA")
 
 if not secret("SUPABASE_URL") or not secret("SUPABASE_KEY"):
     st.error("SUPABASE_URL dan SUPABASE_KEY belum dikonfigurasi.")
@@ -137,7 +159,9 @@ with st.sidebar:
     if st.session_state.auth:
         st.caption("Pengguna aktif")
         st.write(st.session_state.auth["email"])
-        if st.button("Keluar", use_container_width=True):
+        if st.button("Keluar", width="stretch"):
+            st.session_state.supabase_client = None
+            st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
             st.session_state.auth = None
             st.session_state.parsed = None
             st.rerun()
@@ -146,12 +170,13 @@ with st.sidebar:
         with st.form("login"):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Masuk", use_container_width=True, type="primary")
+            submitted = st.form_submit_button("Masuk", width="stretch", type="primary")
         if submitted:
             try:
-                st.session_state.auth = sign_in(
-                    make_client(secret("SUPABASE_URL"), secret("SUPABASE_KEY")), email, password
-                )
+                login_client = make_client(secret("SUPABASE_URL"), secret("SUPABASE_KEY"))
+                st.session_state.auth = sign_in(login_client, email, password)
+                st.session_state.supabase_client = login_client
+                st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
                 st.rerun()
             except Exception:
                 st.error("Login gagal. Periksa email dan password.")
@@ -160,13 +185,80 @@ if not st.session_state.auth:
     st.info("Silakan masuk menggunakan akun Supabase untuk memulai inspeksi.")
     st.stop()
 
-client = authenticated_client()
 try:
-    ultg_rows = fetch_ultg(client)
-    templates = fetch_templates(client)
+    client = authenticated_client()
 except Exception as exc:
-    st.error(f"Tidak dapat membaca referensi Supabase: {exc}")
+    st.error(f"Sesi Supabase tidak dapat dipulihkan: {exc}")
+    if st.button("Masuk ulang", type="primary"):
+        st.session_state.auth = None
+        st.session_state.supabase_client = None
+        st.session_state.reference_cache = {"gi": {}, "bays": {}, "template_items": {}}
+        st.rerun()
     st.stop()
+reference_cache = st.session_state.reference_cache
+reference_cache.setdefault("gi", {})
+reference_cache.setdefault("bays", {})
+reference_cache.setdefault("template_items", {})
+try:
+    if "ultg" not in reference_cache:
+        reference_cache["ultg"] = fetch_ultg(client)
+    if "templates" not in reference_cache:
+        reference_cache["templates"] = fetch_templates(client)
+    ultg_rows = reference_cache["ultg"]
+    templates = reference_cache["templates"]
+except Exception as exc:
+    stop_for_reference_error(exc)
+
+with st.sidebar:
+    st.divider()
+    st.caption("NAVIGASI UTAMA")
+    if st.button(
+        "IMPORT DATA",
+        type="primary" if st.session_state.active_page == "IMPORT DATA" else "secondary",
+        width="stretch",
+        key="nav_import",
+    ):
+        if st.session_state.active_page != "IMPORT DATA":
+            st.session_state.active_page = "IMPORT DATA"
+            st.rerun()
+    if st.button(
+        "MONITORING",
+        type="primary" if st.session_state.active_page == "MONITORING" else "secondary",
+        width="stretch",
+        key="nav_monitoring",
+    ):
+        if st.session_state.active_page != "MONITORING":
+            st.session_state.active_page = "MONITORING"
+            st.rerun()
+    active_page = st.session_state.active_page
+
+if active_page == "MONITORING":
+    render_upload_monitoring_page(
+        client,
+        ultg_rows=ultg_rows,
+    )
+    st.stop()
+
+st.markdown("## Import Data Thermovisi")
+st.caption(
+    "Unggah hasil inspeksi, validasi pasangan Bay–sheet, review analisa, lalu simpan data final."
+)
+
+with st.container(border=True):
+    st.markdown("### Klasifikasi inspeksi")
+    source_1, source_2 = st.columns(2)
+    with source_1:
+        import_work_type = st.selectbox(
+            "Jenis pekerjaan",
+            ["ROUTINE", "FOLLOW_UP", "URGENT"],
+            key="import_work_type",
+        )
+    with source_2:
+        import_stage = st.selectbox(
+            "Tahap",
+            ["TAHAP_1", "TAHAP_2"] if import_work_type == "ROUTINE" else ["ADHOC"],
+            key=f"import_stage_{import_work_type}",
+        )
 
 with st.container(border=True):
     st.markdown("### 1 · Pilih lokasi dan Bay")
@@ -180,7 +272,14 @@ with st.container(border=True):
         )
     ultg_flc = ultg_options.get(ultg_choice)
 
-    gi_rows = fetch_gi(client, ultg_flc) if ultg_flc else []
+    gi_rows = []
+    if ultg_flc:
+        try:
+            if ultg_flc not in reference_cache["gi"]:
+                reference_cache["gi"][ultg_flc] = fetch_gi(client, ultg_flc)
+            gi_rows = reference_cache["gi"][ultg_flc]
+        except Exception as exc:
+            stop_for_reference_error(exc)
     gi_options = {f"{row['gi_name']} — {row['gi_flc']}": row["gi_flc"] for row in gi_rows}
     with location_2:
         gi_choice = st.selectbox(
@@ -193,7 +292,15 @@ with st.container(border=True):
         )
     gi_flc = gi_options.get(gi_choice)
 
-    bay_rows = fetch_bays(client, ultg_flc, gi_flc) if ultg_flc and gi_flc else []
+    bay_rows = []
+    if ultg_flc and gi_flc:
+        bay_cache_key = f"{ultg_flc}|{gi_flc}"
+        try:
+            if bay_cache_key not in reference_cache["bays"]:
+                reference_cache["bays"][bay_cache_key] = fetch_bays(client, ultg_flc, gi_flc)
+            bay_rows = reference_cache["bays"][bay_cache_key]
+        except Exception as exc:
+            stop_for_reference_error(exc)
     with location_3:
         st.metric("Bay tersedia", len(bay_rows))
 
@@ -229,7 +336,7 @@ with st.container(border=True):
                 "Tanggal pelaksanaan": date.today(),
                 "Pukul pelaksanaan": now.time(),
                 "Beban pengukuran (A)": 1.0,
-                "Beban tertinggi bulan (A)": 1.0,
+                "Beban tertinggi pernah dicapai (A)": 1.0,
                 "Suhu lingkungan (°C)": 30.0,
             }
             for row in selected_bay_rows
@@ -238,7 +345,7 @@ with st.container(border=True):
     metadata_editor = st.data_editor(
         metadata_seed,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         num_rows="fixed",
         disabled=["bay_flc", "Bay"],
         column_config={
@@ -247,10 +354,10 @@ with st.container(border=True):
             "Tanggal pelaksanaan": st.column_config.DateColumn("Tanggal pelaksanaan", format="DD/MM/YYYY"),
             "Pukul pelaksanaan": st.column_config.TimeColumn("Pukul", format="HH:mm"),
             "Beban pengukuran (A)": st.column_config.NumberColumn(
-                "Beban ukur (A)", min_value=0.01, step=1.0, format="%.2f"
+                "Beban ukur (A)", min_value=0.0, step=1.0, format="%.2f"
             ),
-            "Beban tertinggi bulan (A)": st.column_config.NumberColumn(
-                "Beban tertinggi (A)", min_value=0.01, step=1.0, format="%.2f"
+            "Beban tertinggi pernah dicapai (A)": st.column_config.NumberColumn(
+                "Beban tertinggi pernah dicapai (A)", min_value=0.0, step=1.0, format="%.2f"
             ),
             "Suhu lingkungan (°C)": st.column_config.NumberColumn(
                 "Suhu lingkungan (°C)", min_value=-50.0, max_value=100.0, step=0.1, format="%.1f"
@@ -319,8 +426,14 @@ with st.container(border=True):
     parse_disabled = not (uploaded and template_code and not metadata_errors)
     if st.button("Baca dan validasi Excel", type="primary", disabled=parse_disabled):
         try:
-            items = fetch_template_items(client, template_code)
-            parsed, warnings = parse_workbook(uploaded.getvalue(), items)
+            if template_code not in reference_cache["template_items"]:
+                reference_cache["template_items"][template_code] = fetch_template_items(client, template_code)
+            items = reference_cache["template_items"][template_code]
+            parsed, warnings = parse_workbook(
+                uploaded.getvalue(),
+                items,
+                include_unmatched_sheets=True,
+            )
             st.session_state.parsed = parsed
             st.session_state.parse_warnings = warnings
         except Exception as exc:
@@ -338,82 +451,370 @@ if not parsed:
     st.stop()
 
 with st.container(border=True):
-    st.markdown("### 4 · Petakan sheet ke Bay")
-    st.caption("Setiap sheet hanya dapat diarahkan ke Bay yang telah dipilih pada langkah pertama.")
-    mapping_seed = pd.DataFrame(
-        [
-            {
-                "Sheet Excel": parsed_sheet.sheet_name,
-                "Jumlah nilai": parsed_sheet.numeric_count,
-                "Bay tujuan": suggested_bay_label(parsed_sheet.sheet_name, selected_bay_rows),
+    template_items = reference_cache["template_items"][template_code]
+    mapping_mode = mapping_mode_from_template(template_meta, template_items)
+    is_trafo_two_sheet = mapping_mode == TRAFO_TWO_SHEET_MODE
+    st.markdown(
+        "### 4 · Pasangkan dua sheet untuk setiap Bay Trafo"
+        if is_trafo_two_sheet
+        else "### 4 · Pasangkan sheet ke Bay"
+    )
+    st.caption(
+        (
+            "Template Trafo menggunakan Sheet Trafo dan Sheet Bay untuk setiap Bay. "
+            "Nama sheet bebas dan perannya mengikuti pilihan pengguna."
+        )
+        if is_trafo_two_sheet
+        else (
+            "Template non-Trafo menggunakan satu sheet untuk setiap Bay. "
+            "Pilih sheet tujuan tanpa harus menyeragamkan nama sheet."
+        )
+    )
+    sheet_names = [parsed_sheet.sheet_name for parsed_sheet in parsed]
+    if is_trafo_two_sheet:
+        mapping_seed = pd.DataFrame(
+            [
+                {
+                    "bay_flc": row["bay_flc"],
+                    "Bay": bay_label(row),
+                    "Sheet Trafo": None,
+                    "Sheet Bay": None,
+                }
+                for row in selected_bay_rows
+            ]
+        )
+        mapping_editor = st.data_editor(
+            mapping_seed,
+            hide_index=True,
+            width="stretch",
+            num_rows="fixed",
+            disabled=["bay_flc", "Bay"],
+            column_config={
+                "bay_flc": None,
+                "Bay": st.column_config.TextColumn("Bay tujuan", width="large"),
+                "Sheet Trafo": st.column_config.SelectboxColumn(
+                    "Sheet Trafo", options=sheet_names, width="large", required=True
+                ),
+                "Sheet Bay": st.column_config.SelectboxColumn(
+                    "Sheet Bay", options=sheet_names, width="large", required=True
+                ),
+            },
+            key=f"bay_sheet_mapping_trafo_{digest}_{'_'.join(selected_bay_ids)}",
+        )
+        sheet_assignments, mapping_errors = trafo_sheet_mapping_from_bays(
+            mapping_editor.to_dict("records"),
+            expected_bay_ids=selected_bay_ids,
+            valid_sheet_names=sheet_names,
+            sheet_sections=None,
+        )
+    else:
+        mapping_seed = pd.DataFrame(
+            [
+                {"bay_flc": row["bay_flc"], "Bay": bay_label(row), "Sheet Excel": None}
+                for row in selected_bay_rows
+            ]
+        )
+        mapping_editor = st.data_editor(
+            mapping_seed,
+            hide_index=True,
+            width="stretch",
+            num_rows="fixed",
+            disabled=["bay_flc", "Bay"],
+            column_config={
+                "bay_flc": None,
+                "Bay": st.column_config.TextColumn("Bay tujuan", width="large"),
+                "Sheet Excel": st.column_config.SelectboxColumn(
+                    "Sheet hasil pengukuran", options=sheet_names, width="large", required=True
+                ),
+            },
+            key=f"bay_sheet_mapping_single_{digest}_{'_'.join(selected_bay_ids)}",
+        )
+        single_mapping, mapping_errors = sheet_mapping_from_bays(
+            mapping_editor.to_dict("records"),
+            expected_bay_ids=selected_bay_ids,
+            valid_sheet_names=sheet_names,
+        )
+        single_sections = {
+            str(item.get("form_section_code") or "MAIN") for item in template_items
+        }
+        single_section = next(iter(single_sections)) if len(single_sections) == 1 else "MAIN"
+        sheet_assignments = {
+            sheet_name: {
+                "bay_flc": bay_id,
+                "sheet_role": "MAIN",
+                "form_section_code": single_section,
             }
-            for parsed_sheet in parsed
-        ]
-    )
-    mapping_editor = st.data_editor(
-        mapping_seed,
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        disabled=["Sheet Excel", "Jumlah nilai"],
-        column_config={
-            "Sheet Excel": st.column_config.TextColumn("Sheet Excel", width="large"),
-            "Jumlah nilai": st.column_config.NumberColumn("Jumlah nilai", width="small"),
-            "Bay tujuan": st.column_config.SelectboxColumn(
-                "Bay tujuan", options=selected_labels, width="large"
-            ),
-        },
-        key=f"mapping_editor_{digest}_{'_'.join(selected_bay_ids)}",
-    )
-    label_to_bay = {bay_label(row): row["bay_flc"] for row in selected_bay_rows}
-    sheet_to_bay: dict[str, str] = {}
-    for _, row in mapping_editor.iterrows():
-        destination = row["Bay tujuan"]
-        if isinstance(destination, str) and destination in label_to_bay:
-            sheet_to_bay[str(row["Sheet Excel"])] = label_to_bay[destination]
-    mapping_complete = len(sheet_to_bay) == len(parsed)
-    if not mapping_complete:
-        st.warning("Pilih Bay tujuan untuk seluruh sheet sebelum menyimpan.")
+            for sheet_name, bay_id in single_mapping.items()
+        }
+    mapping_complete = not mapping_errors
 
-ambient_by_sheet = {
-    sheet_name: float(metadata_by_bay[bay_id]["ambient_temperature_c"])
-    for sheet_name, bay_id in sheet_to_bay.items()
-    if bay_id in metadata_by_bay
-}
-rows = preview_rows(parsed, ambient_by_sheet)
-total_invalid = sum(row["data_quality_status"] == "INVALID" for row in rows)
-total_warning = sum(row["data_quality_status"] == "WARNING" for row in rows)
-numeric_count = sum(row["temperature_c"] is not None for row in rows)
+    if mapping_complete:
+        try:
+            mapped_parsed, mapped_warnings = parse_workbook(
+                uploaded.getvalue(),
+                template_items,
+                forced_section_by_sheet={
+                    sheet_name: assignment["form_section_code"]
+                    for sheet_name, assignment in sheet_assignments.items()
+                },
+                selected_sheet_names=set(sheet_assignments),
+            )
+            for warning in mapped_warnings:
+                st.warning(warning)
+            reparsed_names = {item.sheet_name for item in mapped_parsed}
+            missing_selected = sorted(set(sheet_assignments) - reparsed_names)
+            if missing_selected:
+                mapping_errors.append(
+                    "Sheet yang dipilih belum dapat dibaca menggunakan bagian form yang ditentukan: "
+                    + ", ".join(missing_selected)
+                )
+                mapping_complete = False
+        except Exception as exc:
+            mapped_parsed = []
+            mapping_errors.append(f"Sheet yang dipilih tidak dapat dibaca: {exc}")
+            mapping_complete = False
+    else:
+        mapped_parsed = []
+    for message in mapping_errors:
+        st.warning(message)
+    parsed_by_name = {item.sheet_name: item for item in mapped_parsed}
+    sheet_to_bay = {
+        sheet_name: assignment["bay_flc"]
+        for sheet_name, assignment in sheet_assignments.items()
+    }
+    assignments_by_bay: dict[str, dict[str, str]] = {}
+    for sheet_name, assignment in sheet_assignments.items():
+        assignments_by_bay.setdefault(assignment["bay_flc"], {})[
+            assignment["sheet_role"]
+        ] = sheet_name
+    if mapping_complete:
+        if is_trafo_two_sheet:
+            confirmation_rows = [
+                {
+                    "Bay": bay_label(row),
+                    "Sheet Trafo": assignments_by_bay[row["bay_flc"]]["TRAFO"],
+                    "Nilai Trafo": parsed_by_name[
+                        assignments_by_bay[row["bay_flc"]]["TRAFO"]
+                    ].numeric_count,
+                    "Sheet Bay": assignments_by_bay[row["bay_flc"]]["BAY"],
+                    "Nilai Bay": parsed_by_name[
+                        assignments_by_bay[row["bay_flc"]]["BAY"]
+                    ].numeric_count,
+                }
+                for row in selected_bay_rows
+            ]
+            st.success("Pemetaan dua sheet Trafo lengkap. Periksa kembali pasangan Bay.")
+        else:
+            confirmation_rows = [
+                {
+                    "Bay": bay_label(row),
+                    "Sheet Excel": assignments_by_bay[row["bay_flc"]]["MAIN"],
+                    "Nilai suhu": parsed_by_name[
+                        assignments_by_bay[row["bay_flc"]]["MAIN"]
+                    ].numeric_count,
+                }
+                for row in selected_bay_rows
+            ]
+            st.success("Pemetaan satu sheet per Bay lengkap. Periksa kembali sebelum review.")
+        st.dataframe(pd.DataFrame(confirmation_rows), hide_index=True, width="stretch")
+
+    ignored_sheets = [name for name in sheet_names if name not in sheet_to_bay]
+    if ignored_sheets:
+        st.info(f"Sheet yang tidak dipilih tidak akan diimpor: {', '.join(ignored_sheets)}")
+
+total_invalid = sum(sheet.invalid_count for sheet in mapped_parsed)
 
 with st.container(border=True):
-    st.markdown("### 5 · Review dan simpan")
-    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
-    metric_1.metric("Bay dipilih", len(selected_bay_rows))
-    metric_2.metric("Nilai suhu", numeric_count)
-    metric_3.metric("Warning", total_warning)
-    metric_4.metric("Invalid", total_invalid)
+    st.markdown("### 5 · Review hasil dan analisa")
+    st.caption(
+        (
+            "Pilih satu Bay. Sheet Trafo dan Sheet Bay ditampilkan pada tab terpisah."
+            if is_trafo_two_sheet
+            else "Pilih satu Bay untuk menampilkan sheet hasil pengukurannya."
+        )
+    )
 
-    preview_df = pd.DataFrame(rows).rename(
-        columns={
-            "sheet_name": "Sheet",
-            "equipment_group_code": "Peralatan",
-            "point_label": "Titik ukur",
-            "phase_code": "Fasa",
-            "temperature_c": "Suhu °C",
-            "delta_ambient_c": "ΔT ambient °C",
-            "source_cell_address": "Sel",
-            "data_quality_status": "Status",
-            "validation_message": "Pesan",
-        }
+    selected_bay_by_id = {row["bay_flc"]: row for row in selected_bay_rows}
+    review_options = {
+        bay_label(selected_bay_by_id[bay_id]): bay_id
+        for bay_id in assignments_by_bay
+        if bay_id in selected_bay_by_id
+        and (
+            {"TRAFO", "BAY"}.issubset(assignments_by_bay[bay_id])
+            if is_trafo_two_sheet
+            else "MAIN" in assignments_by_bay[bay_id]
+        )
+    }
+    review_choice = st.selectbox(
+        "Bay yang direview",
+        list(review_options),
+        index=0 if review_options else None,
+        placeholder="Pilih Bay",
+        disabled=not review_options,
     )
-    st.dataframe(
-        preview_df[
-            ["Sheet", "Peralatan", "Titik ukur", "Fasa", "Suhu °C", "ΔT ambient °C", "Sel", "Status", "Pesan"]
-        ],
-        use_container_width=True,
-        height=420,
-        hide_index=True,
+
+    review_rows_by_bay: dict[str, list[dict[str, Any]]] = {}
+    template_items = reference_cache["template_items"][template_code]
+    for bay_id in review_options.values():
+        bay_rows: list[dict[str, Any]] = []
+        roles = ("TRAFO", "BAY") if is_trafo_two_sheet else ("MAIN",)
+        for role in roles:
+            review_sheet = parsed_by_name[assignments_by_bay[bay_id][role]]
+            review_metadata = metadata_by_bay[bay_id]
+            bay_rows.extend(
+                build_sheet_review(
+                    review_sheet,
+                    template_items,
+                    measurement_current_a=float(review_metadata["measurement_current_a"]),
+                    monthly_peak_current_a=float(review_metadata["monthly_peak_current_a"]),
+                    ambient_temperature_c=float(review_metadata["ambient_temperature_c"]),
+                )
+            )
+        review_rows_by_bay[bay_id] = bay_rows
+
+    all_review_rows: list[dict[str, Any]] = []
+    if review_choice:
+        review_bay_id = review_options[review_choice]
+        review_metadata = metadata_by_bay[review_bay_id]
+
+        info_1, info_2, info_3 = st.columns(3)
+        info_1.metric("Beban ukur", f"{review_metadata['measurement_current_a']:.2f} A")
+        info_2.metric("Beban tertinggi", f"{review_metadata['monthly_peak_current_a']:.2f} A")
+        info_3.metric("Suhu lingkungan", f"{review_metadata['ambient_temperature_c']:.1f} °C")
+
+        if is_trafo_two_sheet:
+            tabs = st.tabs(["Trafo Utama", "Bay Trafo"])
+            role_config = ((tabs[0], "TRAFO", "Sheet Trafo"), (tabs[1], "BAY", "Sheet Bay"))
+        else:
+            role_config = ((st.container(), "MAIN", "Sheet hasil pengukuran"),)
+        for tab, role, role_label in role_config:
+            with tab:
+                review_sheet_name = assignments_by_bay[review_bay_id][role]
+                review_sheet = parsed_by_name[review_sheet_name]
+                sheet_item_ids = {
+                    measurement.template_item_id for measurement in review_sheet.measurements
+                }
+                review_rows = [
+                    row for row in review_rows_by_bay[review_bay_id]
+                    if row.get("Template item ID") in sheet_item_ids
+                ]
+                all_review_rows.extend(review_rows)
+                st.caption(
+                    f"{role_label}: {review_sheet_name} · "
+                    f"{review_sheet.numeric_count} nilai suhu terbaca"
+                )
+                review_df = pd.DataFrame(compact_review_rows(review_rows))
+                st.dataframe(
+                    style_compact_review(review_df),
+                    width="stretch",
+                    height=560,
+                    hide_index=True,
+                    column_config={
+                        "No.": st.column_config.NumberColumn("No.", width="small", format="%d"),
+                        "Peralatan": st.column_config.TextColumn("Peralatan", width="medium"),
+                        "Titik yang diperiksa": st.column_config.TextColumn(
+                            "Titik yang diperiksa", width="large"
+                        ),
+                        "Pengukuran": st.column_config.TextColumn(
+                            "Pengukuran", width="medium"
+                        ),
+                        "Delta T": st.column_config.TextColumn(
+                            "Delta T", width="large"
+                        ),
+                        "Kondisi": st.column_config.TextColumn("Kondisi", width="medium"),
+                        "AHI Thermovisi": st.column_config.TextColumn(
+                            "AHI Thermovisi", width="medium"
+                        ),
+                        "Kesimpulan / Rekomendasi": st.column_config.TextColumn(
+                            "Kesimpulan / Rekomendasi", width="large"
+                        ),
+                        "Status Data": st.column_config.TextColumn(
+                            "Status Data", width="small"
+                        ),
+                        "Status Analisa": st.column_config.TextColumn(
+                            "Status Analisa", width="medium"
+                        ),
+                    },
+                )
+                with st.expander("Lihat detail teknis lengkap"):
+                    st.dataframe(
+                        pd.DataFrame(review_rows),
+                        width="stretch",
+                        height=420,
+                        hide_index=True,
+                    )
+
+        abnormal_count = sum(
+            int(row.get("Tingkat perhatian") or 0) > 0 for row in all_review_rows
+        )
+        invalid_review = sum(row["Status data"] == "INVALID" for row in all_review_rows)
+        bay_ahi = aggregate_ahi(row.get("AHI Thermovisi") for row in all_review_rows)
+        summary_1, summary_2, summary_3, summary_4 = st.columns(4)
+        summary_1.metric("Total baris review", len(all_review_rows))
+        summary_2.metric("Perlu perhatian", abnormal_count)
+        summary_3.metric("Data invalid", invalid_review)
+        summary_4.metric(
+            "AHI Bay Thermovisi",
+            bay_ahi.display if bay_ahi else "Tidak dapat dievaluasi",
+        )
+
+    st.divider()
+    st.markdown("#### Validasi sebelum penyimpanan")
+    initial_validations = {
+        bay_id: validate_bay_review(rows)
+        for bay_id, rows in review_rows_by_bay.items()
+    }
+    incomplete_total = sum(item.incomplete_rows for item in initial_validations.values())
+    accept_incomplete = st.checkbox(
+        "Saya memahami dan menyetujui penyimpanan titik dengan data tidak lengkap.",
+        value=False,
+        disabled=incomplete_total == 0,
+        help="Tidak diperlukan untuk titik NOT_MEASURED atau NOT_APPLICABLE.",
     )
+    validations = {
+        bay_id: validate_bay_review(rows, accept_incomplete=accept_incomplete)
+        for bay_id, rows in review_rows_by_bay.items()
+    }
+    summary_rows = [
+        validation_summary_row(
+            bay_label(selected_bay_by_id[bay_id]), validation
+        )
+        for bay_id, validation in validations.items()
+    ]
+    if summary_rows:
+        st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
+
+    all_bays_ready = bool(validations) and all(item.ready for item in validations.values())
+    validation_signature = repr(
+        (
+            parse_signature,
+            template_code,
+            assignments_by_bay,
+            metadata_by_bay,
+            accept_incomplete,
+        )
+    )
+    if st.button(
+        "Validasi seluruh Bay",
+        type="secondary",
+        disabled=not mapping_complete or not all_bays_ready,
+        width="stretch",
+    ):
+        st.session_state.review_validation_signature = validation_signature
+        st.success("Seluruh Bay lolos validasi dan siap untuk persetujuan akhir.")
+    validation_approved = (
+        st.session_state.review_validation_signature == validation_signature
+    )
+    if not all_bays_ready:
+        st.error("Masih ada Bay yang diblokir atau memerlukan konfirmasi data tidak lengkap.")
+
+    review_confirmed = st.checkbox(
+        "Saya telah memeriksa seluruh pasangan Bay–Sheet, hasil pengukuran, dan analisa.",
+        value=False,
+        disabled=not validation_approved,
+    )
+    if not review_confirmed:
+        st.info("Penyimpanan masih dikunci. Selesaikan review seluruh sheet terlebih dahulu.")
 
     detail_1, detail_2 = st.columns(2)
     with detail_1:
@@ -422,22 +823,54 @@ with st.container(border=True):
         notes = st.text_input("Catatan (opsional)", placeholder="Catatan umum untuk file ini")
 
     drive_info = st.secrets.get("google_drive", {})
-    drive_folder_id = str(drive_info.get("folder_id", "")) if drive_info else ""
-    service_account = dict(st.secrets.get("google_service_account", {}))
+    drive_folder_id = normalize_drive_folder_id(
+        str(drive_info.get("folder_id", "")) if drive_info else ""
+    )
+    drive_web_app_url = str(drive_info.get("web_app_url", "")).strip() if drive_info else ""
+    drive_shared_secret = (
+        str(drive_info.get("shared_secret", "")).strip() if drive_info else ""
+    )
+    telegram_info = st.secrets.get("telegram", {})
+    telegram_bot_token = (
+        str(telegram_info.get("bot_token", "")).strip() if telegram_info else ""
+    )
+    telegram_chat_id = (
+        str(telegram_info.get("chat_id", "")).strip() if telegram_info else ""
+    )
+    gateway_error: str | None = None
+    try:
+        validate_gateway_config(drive_web_app_url, drive_shared_secret)
+    except ValueError as exc:
+        gateway_error = str(exc)
     if total_invalid:
         st.error("Penyimpanan diblokir karena masih ada data INVALID. Perbaiki Excel atau template lalu validasi ulang.")
-    if not service_account or not drive_folder_id:
-        st.warning("Konfigurasi Google Drive belum lengkap pada secrets.toml.")
+    if gateway_error:
+        st.error(f"Konfigurasi gateway Google Drive tidak valid: {gateway_error}")
+    if not drive_folder_id:
+        st.warning("google_drive.folder_id belum dikonfigurasi pada secrets.toml.")
+    if not gateway_error and drive_folder_id:
+        st.success("Gateway Apps Script Google Drive siap digunakan.")
+    if telegram_bot_token and telegram_chat_id:
+        st.success("Notifikasi anomali Telegram siap digunakan.")
+    else:
+        st.warning(
+            "Telegram belum dikonfigurasi. Anomali tetap tersimpan, tetapi notifikasi "
+            "akan berstatus PENDING."
+        )
 
     ready = (
         mapping_complete
+        and validation_approved
+        and review_confirmed
         and not metadata_errors
         and total_invalid == 0
-        and bool(service_account)
+        and not gateway_error
+        and bool(drive_web_app_url)
+        and bool(drive_shared_secret)
         and bool(drive_folder_id)
         and bool(template_meta)
     )
-    if st.button("Simpan inspeksi Thermovisi", type="primary", disabled=not ready, use_container_width=True):
+    if st.button("Simpan inspeksi Thermovisi", type="primary", disabled=not ready, width="stretch"):
         with st.spinner("Mengunggah file dan menyimpan hasil inspeksi..."):
             try:
                 upload_id = save_import(
@@ -447,14 +880,39 @@ with st.container(border=True):
                     mime_type=uploaded.type
                     or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     folder_id=drive_folder_id,
-                    service_account_info=service_account,
+                    drive_web_app_url=drive_web_app_url,
+                    drive_shared_secret=drive_shared_secret,
+                    drive_gi_name=next(
+                        (
+                            str(row.get("gi_name") or gi_flc)
+                            for row in gi_rows
+                            if row.get("gi_flc") == gi_flc
+                        ),
+                        str(gi_flc),
+                    ),
                     template_code=template_code,
-                    parsed_sheets=parsed,
-                    sheet_to_bay=sheet_to_bay,
+                    parsed_sheets=mapped_parsed,
+                    sheet_assignments=sheet_assignments,
                     metadata_by_bay=metadata_by_bay,
+                    review_rows_by_bay=review_rows_by_bay,
                     executor=executor,
                     notes=notes,
                     user_id=st.session_state.auth["user_id"],
+                    work_type=import_work_type,
+                    stage_code=import_stage,
+                    telegram_bot_token=telegram_bot_token,
+                    telegram_chat_id=telegram_chat_id,
+                    location_by_bay={
+                        str(row["bay_flc"]): {
+                            "ultg_name": str(row.get("ultg_name") or ultg_flc),
+                            "gi_name": str(row.get("gi_name") or gi_flc),
+                            "bay_name": str(
+                                row.get("bay_short_name") or row.get("bay_name") or row["bay_flc"]
+                            ),
+                        }
+                        for row in selected_bay_rows
+                    },
+                    workbook_sheet_count=len(parsed),
                 )
                 st.success(f"Import selesai. Upload ID: {upload_id}")
                 st.session_state.parsed = None

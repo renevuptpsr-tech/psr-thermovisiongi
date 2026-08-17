@@ -47,3 +47,18 @@ def test_peak_current_cannot_be_lower_than_measurement_current():
             notes=None,
             user_id="user-1",
         )
+
+
+def test_zero_measurement_current_is_allowed_for_non_operating_transformer():
+    row = build_inspection_row(
+        inspection_id="inspection-1",
+        upload_id="upload-1",
+        target_functloc_id="BAY-1",
+        source_sheet_name="SHEET-1",
+        template_code="TRAFO_150_20_STANDARD_V1",
+        metadata=metadata(current=0.0, peak=200.0),
+        executor=None,
+        notes=None,
+        user_id="user-1",
+    )
+    assert row["measurement_current_a"] == 0.0

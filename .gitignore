@@ -10,6 +10,8 @@ venv/
 
 # Streamlit secrets (jangan pernah commit kredensial)
 .streamlit/secrets.toml
+.streamlit/secrets.toml.backup
+.streamlit/secrets*.backup
 
 # Environment and service-account credentials
 .env
@@ -24,4 +26,3 @@ credentials.json
 .idea/
 .DS_Store
 Thumbs.db
-

@@ -9,11 +9,12 @@ def prepare_anomaly_rows(
     inspection_id: str,
     evaluation_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Simpan hanya evaluasi yang memerlukan perhatian sebagai anomali."""
+    """Eskalasi hanya AHI Poor/Critical sebagai anomali tindak lanjut."""
     result: list[dict[str, Any]] = []
     for evaluation in evaluation_rows:
         severity = int(evaluation.get("severity") or 0)
-        if severity <= 0:
+        ahi_score = int(evaluation.get("ahi_score") or 0)
+        if ahi_score < 4:
             continue
         result.append(
             {
@@ -27,7 +28,7 @@ def prepare_anomaly_rows(
                 "analyzed_delta_c": evaluation.get("analyzed_delta_c"),
                 "maximum_temperature_c": evaluation.get("maximum_temperature_c"),
                 "severity": severity,
-                "ahi_score": evaluation.get("ahi_score"),
+                "ahi_score": ahi_score,
                 "ahi_category": evaluation.get("ahi_category"),
                 "anomaly_status": "OPEN",
                 "notification_status": "PENDING",
